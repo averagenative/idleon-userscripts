@@ -31,8 +31,7 @@ The panel shows a status dot (green = running) and these controls:
 | Control | What it does |
 |---|---|
 | **Start / Stop** | Toggle clicking. |
-| **Interval** | Milliseconds between clicks (min 20). |
-| **Timing jitter** | Random ± ms added to each interval so timing isn't robotic (0 = exact). |
+| **Interval min / max** | Each click waits a random time picked uniformly in `[min, max]` ms, so the cadence isn't robotic. Set both equal for a fixed rate (min 20). |
 | **Pos jitter** | Random ± px added to each click position (0 = pixel-perfect). |
 | **Target: Cursor** | Clicks wherever your mouse currently is. |
 | **Target: Fixed** | Clicks a fixed point you set. |
@@ -56,7 +55,7 @@ Hotkeys are ignored while you're typing in one of the panel's own number fields.
 
 - **Closed shadow DOM host** pinned at max `z-index` with `pointer-events` only on the panel itself, so it overlays the game without blocking it and stays invisible to page scripts.
 - Each "click" dispatches a full `mousemove → mousedown → mouseup → click` sequence via `document.elementFromPoint` (falling back to the game `<canvas>`), matching what a real click produces.
-- Timing and position jitter make the input stream look less mechanical.
+- A randomized per-click interval (uniform in `[min, max]`) plus position jitter make the input stream look less mechanical.
 
 ## License
 

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         IdleOn Clicker
 // @namespace    nativerobot
-// @version      3.0
+// @version      3.1
 // @description  Stealthy in-page autoclicker panel for Legends of IdleOn (browser)
 // @match        https://www.legendsofidleon.com/*
 // @grant        none
@@ -13,13 +13,20 @@
   // ---------- persistence ----------
   const KEY = 'ac_cfg';
   const cfg = Object.assign({
-    interval: 800,     // ms between clicks
-    jitterMs: 40,      // +/- timing jitter (0 = exact)
+    ivMin: 600,        // ms — lower bound of click interval
+    ivMax: 1200,       // ms — upper bound; each click picks uniformly in [min, max]
     jitterPx: 2,       // +/- position jitter in px (0 = pixel-perfect)
     mode: 'cursor',    // 'cursor' | 'fixed'
     fx: 0, fy: 0,      // fixed target
     hidden: false
   }, JSON.parse(localStorage.getItem(KEY) || '{}'));
+  // migrate old base+jitter config -> min/max range
+  if (cfg.ivMin === undefined && cfg.interval !== undefined) {
+    const j = cfg.jitterMs || 0;
+    cfg.ivMin = Math.max(20, cfg.interval - j);
+    cfg.ivMax = cfg.interval + j;
+  }
+  delete cfg.interval; delete cfg.jitterMs;
   const save = () => localStorage.setItem(KEY, JSON.stringify(cfg));
 
   // ---------- state ----------
@@ -67,8 +74,8 @@
       <div id="hd"><span><span id="dot"></span> <b>IdleOn Clicker</b></span><span id="min">–</span></div>
       <div class="body">
         <button class="btn go" id="run">Start  (F8)</button>
-        <div class="row"><label>Interval</label><span><input id="iv" type="number" min="20" step="10"> ms</span></div>
-        <div class="row"><label>Timing jitter</label><span><input id="jm" type="number" min="0" step="5"> ms</span></div>
+        <div class="row"><label>Interval min</label><span><input id="ivmin" type="number" min="20" step="10"> ms</span></div>
+        <div class="row"><label>Interval max</label><span><input id="ivmax" type="number" min="20" step="10"> ms</span></div>
         <div class="row"><label>Pos jitter</label><span><input id="jp" type="number" min="0" step="1"> px</span></div>
         <div class="row"><label>Target</label>
           <div class="seg"><button data-m="cursor">Cursor</button><button data-m="fixed">Fixed</button></div>
@@ -80,12 +87,12 @@
     </div>`;
 
   const $ = s => root.querySelector(s);
-  const dot = $('#dot'), runBtn = $('#run'), ivEl = $('#iv'), jmEl = $('#jm'),
+  const dot = $('#dot'), runBtn = $('#run'), ivMinEl = $('#ivmin'), ivMaxEl = $('#ivmax'),
         jpEl = $('#jp'), xyEl = $('#xy'), setBtn = $('#set'), panel = $('#p');
 
   // ---------- UI sync ----------
   function sync() {
-    ivEl.value = cfg.interval; jmEl.value = cfg.jitterMs; jpEl.value = cfg.jitterPx;
+    ivMinEl.value = cfg.ivMin; ivMaxEl.value = cfg.ivMax; jpEl.value = cfg.jitterPx;
     root.querySelectorAll('.seg button').forEach(b => b.classList.toggle('sel', b.dataset.m === cfg.mode));
     xyEl.textContent = cfg.mode === 'fixed' ? `${cfg.fx || '—'}, ${cfg.fy || '—'}` : '(follows cursor)';
     dot.classList.toggle('on', on);
@@ -115,7 +122,8 @@
     if (!on) return;
     const [tx, ty] = cfg.mode === 'fixed' ? [cfg.fx, cfg.fy] : [lastX, lastY];
     clickAt(tx, ty);
-    timer = setTimeout(tick, Math.max(20, cfg.interval + rand(cfg.jitterMs)));
+    const lo = Math.min(cfg.ivMin, cfg.ivMax), hi = Math.max(cfg.ivMin, cfg.ivMax);
+    timer = setTimeout(tick, Math.max(20, lo + Math.random() * (hi - lo)));
   }
 
   function start() { if (!on) { on = true; sync(); tick(); } }
@@ -137,8 +145,8 @@
   // ---------- wiring ----------
   runBtn.onclick = toggle;
   setBtn.onclick = () => capturing ? null : armCapture();
-  ivEl.onchange = e => { cfg.interval = Math.max(20, +e.target.value); save(); };
-  jmEl.onchange = e => { cfg.jitterMs = Math.max(0, +e.target.value); save(); };
+  ivMinEl.onchange = e => { cfg.ivMin = Math.max(20, +e.target.value); save(); };
+  ivMaxEl.onchange = e => { cfg.ivMax = Math.max(20, +e.target.value); save(); };
   jpEl.onchange = e => { cfg.jitterPx = Math.max(0, +e.target.value); save(); };
   root.querySelectorAll('.seg button').forEach(b => b.onclick = () => { cfg.mode = b.dataset.m; save(); sync(); });
   $('#min').onclick = () => { cfg.hidden = true; save(); sync(); };
