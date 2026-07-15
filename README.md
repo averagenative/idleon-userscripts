@@ -2,6 +2,8 @@
 
 A stealthy in-page autoclicker panel for [Legends of IdleOn](https://www.legendsofidleon.com/) (browser version), delivered as a [Tampermonkey](https://www.tampermonkey.net/) userscript.
 
+<img src="docs/panel.png" alt="IdleOn Clicker control panel" align="right" width="200">
+
 It renders a small draggable control panel over the game and fires synthetic mouse clicks on a timer — useful for anything in IdleOn that wants repeated clicking (mining/fishing swing timers, afk-gain nudging, etc.). The panel lives in a **closed shadow DOM**, so the page's own JavaScript can't see it. The game doesn't check `isTrusted` on click events, so dispatched clicks are accepted as real.
 
 > ⚠️ Automating input may violate the game's terms of service. Use at your own risk — this is a personal tool.
