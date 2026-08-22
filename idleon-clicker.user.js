@@ -18,6 +18,7 @@
     jitterPx: 2,       // +/- position jitter in px (0 = pixel-perfect)
     mode: 'cursor',    // 'cursor' | 'fixed'
     fx: 0, fy: 0,      // fixed target
+    collapsed: false,  // rolled up to just the title bar
     hidden: false
   }, JSON.parse(localStorage.getItem(KEY) || '{}'));
   // migrate old base+jitter config -> min/max range
@@ -69,7 +70,14 @@
       #xy { color:#6b7280; }
       .hint { color:#4b5563; font-size:11px; text-align:center; }
       #min { cursor:pointer; color:#6b7280; padding:0 4px; }
+      /* When the panel is fully hidden this dot is the way back — F10 is
+         claimed by the browser's menu bar, so a hotkey alone can strand it. */
+      #nub { position: fixed; top: 6px; right: 6px; width: 13px; height: 13px;
+             border-radius: 50%; background: #2563eb; opacity: .55; cursor: pointer;
+             pointer-events: auto; display: none; }
+      #nub:hover { opacity: 1; }
     </style>
+    <div id="nub" title="Show IdleOn Clicker"></div>
     <div id="p">
       <div id="hd"><span><span id="dot"></span> <b>IdleOn Clicker</b></span><span id="min">–</span></div>
       <div class="body">
@@ -88,7 +96,8 @@
 
   const $ = s => root.querySelector(s);
   const dot = $('#dot'), runBtn = $('#run'), ivMinEl = $('#ivmin'), ivMaxEl = $('#ivmax'),
-        jpEl = $('#jp'), xyEl = $('#xy'), setBtn = $('#set'), panel = $('#p');
+        jpEl = $('#jp'), xyEl = $('#xy'), setBtn = $('#set'), panel = $('#p'),
+        nub = $('#nub'), body = $('.body'), minBtn = $('#min');
 
   // ---------- UI sync ----------
   function sync() {
@@ -99,7 +108,10 @@
     runBtn.textContent = on ? 'Stop  (F8)' : 'Start  (F8)';
     runBtn.className = 'btn ' + (on ? 'stop' : 'go');
     setBtn.textContent = capturing ? 'Click a spot…' : 'Set Position';
-    host.style.display = cfg.hidden ? 'none' : '';
+    body.style.display = cfg.collapsed ? 'none' : '';
+    minBtn.textContent = cfg.collapsed ? '+' : '–';
+    panel.style.display = cfg.hidden ? 'none' : '';
+    nub.style.display = cfg.hidden ? '' : 'none';
   }
 
   // ---------- clicking ----------
@@ -149,7 +161,10 @@
   ivMaxEl.onchange = e => { cfg.ivMax = Math.max(20, +e.target.value); save(); };
   jpEl.onchange = e => { cfg.jitterPx = Math.max(0, +e.target.value); save(); };
   root.querySelectorAll('.seg button').forEach(b => b.onclick = () => { cfg.mode = b.dataset.m; save(); sync(); });
-  $('#min').onclick = () => { cfg.hidden = true; save(); sync(); };
+  // Roll the panel up rather than hiding it outright — the title bar stays on
+  // screen so it can always be clicked open again.
+  minBtn.onclick = () => { cfg.collapsed = !cfg.collapsed; save(); sync(); };
+  nub.onclick = () => { cfg.hidden = false; save(); sync(); };
 
   // drag
   (() => {
