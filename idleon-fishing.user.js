@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         IdleOn Fishing Helper
 // @namespace    nativerobot
-// @version      1.6
+// @version      1.7
 // @description  Draws where your cast will land, plus fish and hazard markers, for the IdleOn fishing minigame
 // @match        https://www.legendsofidleon.com/*
 // @grant        none
@@ -765,10 +765,28 @@
     window.addEventListener('mouseup', () => drag = false);
   })();
 
+  // Keep every control out of the tab order and drop focus as soon as it is
+  // released, so a Space or Enter aimed at the game can't re-fire whichever
+  // control was touched last.
+  root.querySelectorAll('button, input[type=checkbox], summary').forEach(el => {
+    el.setAttribute('tabindex', '-1');
+    el.addEventListener('mouseup', () => el.blur());
+  });
+  root.querySelectorAll('input[type=number]').forEach(el => el.addEventListener('keydown', e => {
+    if (e.key === 'Enter' || e.key === 'Escape') el.blur();
+  }));
+
+  // hotkeys (capture phase). These fire even while a number input holds focus:
+  // a function key is never typed into a field, and the game canvas swallows
+  // the mousedown that would otherwise blur it — so a field left focused used
+  // to strand the hotkeys with no way back except the mouse. Whatever is
+  // focused is blurred on the way through, committing a half-typed value.
   window.addEventListener('keydown', e => {
-    if (root.activeElement && root.activeElement.tagName === 'INPUT') return;
-    if (e.key === 'F4') { e.preventDefault(); toggle(); }
-    if (e.key === 'F3') { e.preventDefault(); cfg.hidden = !cfg.hidden; save(); sync(); }
+    if (e.key !== 'F3' && e.key !== 'F4') return;
+    e.preventDefault();
+    if (root.activeElement) root.activeElement.blur();
+    if (e.key === 'F4') toggle();
+    if (e.key === 'F3') { cfg.hidden = !cfg.hidden; save(); sync(); }
   }, true);
 
   sync();

@@ -62,7 +62,7 @@ Drag the panel by its header to move it. All settings persist in `localStorage` 
 | **F9** | Panic off (stop immediately) |
 | **F10** | Hide / show the panel |
 
-Hotkeys are ignored while you're typing in one of the panel's own number fields.
+Hotkeys work even while a panel field has focus — the field is committed and blurred first. The game canvas eats the click that would normally move focus out of a number input, so a hotkey that yielded to the focused field could be stranded there for good.
 
 **The panel can't get stuck.** `–` only rolls it up to the title bar, so it's always clickable. If F10 hides it completely, a small blue dot stays in the top-right corner — click that to bring it back. (Firefox claims F10 for its menu bar, so a hotkey alone isn't a safe way out.)
 

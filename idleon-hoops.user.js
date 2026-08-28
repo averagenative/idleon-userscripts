@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         IdleOn Hoops Helper
 // @namespace    nativerobot
-// @version      1.5
+// @version      1.6
 // @description  Dotted-line shot preview + live ball arc for the Swishy Hoops minigame in Legends of IdleOn
 // @match        https://www.legendsofidleon.com/*
 // @grant        none
@@ -899,13 +899,25 @@
     window.addEventListener('mouseup', () => drag = false);
   })();
 
+  root.querySelectorAll('input[type=number]').forEach(el => el.addEventListener('keydown', e => {
+    if (e.key === 'Enter' || e.key === 'Escape') el.blur();
+  }));
+
+  // hotkeys (capture phase). These fire even while a number input holds focus:
+  // a function key is never typed into a field, and the game canvas swallows
+  // the mousedown that would otherwise blur it — so a field left focused used
+  // to strand the hotkeys with no way back except the mouse. Whatever is
+  // focused is blurred on the way through, committing a half-typed value.
   window.addEventListener('keydown', e => {
-    if (root.activeElement && root.activeElement.tagName === 'INPUT') return;
+    const inField = root.activeElement && root.activeElement.tagName === 'INPUT';
     // Capture phase, so this lands before the browser turns the key into a
     // click on whatever control still holds focus.
-    if ((e.key === ' ' || e.key === 'Enter') && root.activeElement) root.activeElement.blur();
-    if (e.key === 'F7') { e.preventDefault(); toggle(); }
-    if (e.key === 'F6') { e.preventDefault(); cfg.hidden = !cfg.hidden; save(); sync(); }
+    if ((e.key === ' ' || e.key === 'Enter') && !inField && root.activeElement) root.activeElement.blur();
+    if (e.key !== 'F6' && e.key !== 'F7') return;
+    e.preventDefault();
+    if (root.activeElement) root.activeElement.blur();
+    if (e.key === 'F7') toggle();
+    if (e.key === 'F6') { cfg.hidden = !cfg.hidden; save(); sync(); }
   }, true);
 
   sync();

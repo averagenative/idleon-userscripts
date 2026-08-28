@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         IdleOn Clicker
 // @namespace    nativerobot
-// @version      3.1
+// @version      3.3
 // @description  Stealthy in-page autoclicker panel for Legends of IdleOn (browser)
 // @match        https://www.legendsofidleon.com/*
 // @grant        none
@@ -17,7 +17,8 @@
     ivMax: 1200,       // ms — upper bound; each click picks uniformly in [min, max]
     jitterPx: 2,       // +/- position jitter in px (0 = pixel-perfect)
     mode: 'cursor',    // 'cursor' | 'fixed'
-    fx: 0, fy: 0,      // fixed target
+    fx: 0, fy: 0,      // fixed target, viewport px (legacy / no-canvas fallback)
+    fu: null, fv: null,// fixed target as a fraction of the game canvas rect
     collapsed: false,  // rolled up to just the title bar
     hidden: false
   }, JSON.parse(localStorage.getItem(KEY) || '{}'));
@@ -103,7 +104,8 @@
   function sync() {
     ivMinEl.value = cfg.ivMin; ivMaxEl.value = cfg.ivMax; jpEl.value = cfg.jitterPx;
     root.querySelectorAll('.seg button').forEach(b => b.classList.toggle('sel', b.dataset.m === cfg.mode));
-    xyEl.textContent = cfg.mode === 'fixed' ? `${cfg.fx || '—'}, ${cfg.fy || '—'}` : '(follows cursor)';
+    xyEl.textContent = cfg.mode !== 'fixed' ? '(follows cursor)'
+      : hasTarget() ? fixedPoint().map(Math.round).join(', ') : 'not set';
     dot.classList.toggle('on', on);
     runBtn.textContent = on ? 'Stop  (F8)' : 'Start  (F8)';
     runBtn.className = 'btn ' + (on ? 'stop' : 'go');
@@ -114,13 +116,38 @@
     nub.style.display = cfg.hidden ? '' : 'none';
   }
 
+  // ---------- target resolution ----------
+  // Largest canvas on the page is the game; anything smaller is a UI element.
+  function gameCanvas() {
+    let best = null, area = 0;
+    for (const c of document.querySelectorAll('canvas')) {
+      const a = c.clientWidth * c.clientHeight;
+      if (a > area) { area = a; best = c; }
+    }
+    return area > 160000 ? best : null;   // ignore tiny/UI canvases
+  }
+
+  // A fixed target is stored as a fraction of the game canvas, not as viewport
+  // pixels, so it survives a resize, zoom or fullscreen toggle. The canvas is
+  // scaled and letterboxed, so the same screen pixel lands on a different spot
+  // in the world once its size changes — and a click on bare ground is a walk
+  // command, which is how a drifted target sends the character strolling off.
+  const hasTarget = () => cfg.fu != null || cfg.fx || cfg.fy;
+
+  function fixedPoint() {
+    const cv = gameCanvas();
+    if (!cv || cfg.fu == null) return [cfg.fx, cfg.fy];   // pre-3.3 config
+    const r = cv.getBoundingClientRect();
+    return [r.left + cfg.fu * r.width, r.top + cfg.fv * r.height];
+  }
+
   // ---------- clicking ----------
   const rand = j => j ? (Math.random() * 2 - 1) * j : 0;
 
   function clickAt(x, y) {
     x = Math.round(x + rand(cfg.jitterPx));
     y = Math.round(y + rand(cfg.jitterPx));
-    const el = document.elementFromPoint(x, y) || document.querySelector('canvas');
+    const el = document.elementFromPoint(x, y) || gameCanvas();
     if (!el) return;
     for (const type of ['mousemove', 'mousedown', 'mouseup', 'click']) {
       el.dispatchEvent(new MouseEvent(type, {
@@ -132,8 +159,11 @@
 
   function tick() {
     if (!on) return;
-    const [tx, ty] = cfg.mode === 'fixed' ? [cfg.fx, cfg.fy] : [lastX, lastY];
-    clickAt(tx, ty);
+    // Resolved every tick: the canvas rect can change under a running clicker.
+    if (cfg.mode !== 'fixed' || hasTarget()) {
+      const [tx, ty] = cfg.mode === 'fixed' ? fixedPoint() : [lastX, lastY];
+      clickAt(tx, ty);
+    }
     const lo = Math.min(cfg.ivMin, cfg.ivMax), hi = Math.max(cfg.ivMin, cfg.ivMax);
     timer = setTimeout(tick, Math.max(20, lo + Math.random() * (hi - lo)));
   }
@@ -147,7 +177,11 @@
     capturing = true; sync();
     const grab = e => {
       e.preventDefault(); e.stopPropagation();
-      cfg.fx = e.clientX; cfg.fy = e.clientY; cfg.mode = 'fixed';
+      cfg.fx = e.clientX; cfg.fy = e.clientY;
+      const cv = gameCanvas(), r = cv && cv.getBoundingClientRect();
+      cfg.fu = r ? (e.clientX - r.left) / r.width  : null;
+      cfg.fv = r ? (e.clientY - r.top)  / r.height : null;
+      cfg.mode = 'fixed';
       capturing = false; save(); sync();
       window.removeEventListener('mousedown', grab, true);
     };
@@ -183,12 +217,29 @@
     window.addEventListener('mouseup', () => drag = false);
   })();
 
-  // hotkeys (capture phase; ignore while typing in our own fields)
+  // Keep every control out of the tab order and drop focus as soon as it is
+  // released, so a Space or Enter aimed at the game can't re-fire whichever
+  // button was touched last.
+  root.querySelectorAll('button').forEach(el => {
+    el.setAttribute('tabindex', '-1');
+    el.addEventListener('mouseup', () => el.blur());
+  });
+  root.querySelectorAll('input').forEach(el => el.addEventListener('keydown', e => {
+    if (e.key === 'Enter' || e.key === 'Escape') el.blur();
+  }));
+
+  // hotkeys (capture phase). These fire even while a number input holds focus:
+  // a function key is never typed into a field, and the game canvas swallows
+  // the mousedown that would otherwise blur it — so a field left focused used
+  // to strand F8/F9/F10 with no way back except the mouse. Whatever is focused
+  // is blurred on the way through, which also commits a half-typed value.
   window.addEventListener('keydown', e => {
-    if (root.activeElement && root.activeElement.tagName === 'INPUT') return;
-    if (e.key === 'F8')  { e.preventDefault(); toggle(); }
-    if (e.key === 'F9')  { e.preventDefault(); stop(); }            // panic off
-    if (e.key === 'F10') { e.preventDefault(); cfg.hidden = !cfg.hidden; save(); sync(); }
+    if (e.key !== 'F8' && e.key !== 'F9' && e.key !== 'F10') return;
+    e.preventDefault();
+    if (root.activeElement) root.activeElement.blur();
+    if (e.key === 'F8')  toggle();
+    if (e.key === 'F9')  stop();                                    // panic off
+    if (e.key === 'F10') { cfg.hidden = !cfg.hidden; save(); sync(); }
   }, true);
 
   sync();
