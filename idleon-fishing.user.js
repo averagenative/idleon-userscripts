@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         IdleOn Fishing Helper
 // @namespace    nativerobot
-// @version      1.7
+// @version      1.8
 // @description  Draws where your cast will land, plus fish and hazard markers, for the IdleOn fishing minigame
 // @match        https://www.legendsofidleon.com/*
 // @grant        none
@@ -32,18 +32,22 @@
     ruler: true,       // numbered 0-8 graduations on the gauge and lane
     debug: false,
     // landing = a * powerFraction + b, both as a fraction along the lane.
-    // v4: measured directly — 9 casts read frame-by-frame off a recording,
-    // pairing the locked gauge fill (full-pole scale, see readMeter) with the
-    // splash position. Fit residuals stay within ~2.5% of the lane. The v3
-    // seed guessed the below-lane pole share at 20% and put the intercept at
-    // -0.17, which shifted every prediction ~15% of the lane short.
-    calVer: 4,         // bump to discard samples gathered in the old power scale
-    aimA: 0.858, aimB: 0.013,
+    // v5: re-measured after the gauge-height bug below was fixed. Every sample
+    // gathered before that is worthless — readMeter's top edge could latch onto
+    // a speck of foliage a third of a gauge above the pole, so the same red bar
+    // reported anywhere between 39% and 67% power, at random, from frame to
+    // frame. Six casts off a 44-second recording, pairing the locked fill with
+    // where the bobber came to rest: residuals within 3.2% of the lane, mean
+    // 1.4%. The v4 pair (0.858 / 0.013) overshoots every one of them — mean
+    // 2.5% of the lane long, worst 5.9% — which is the fit soaking up the
+    // gauge error it was measured through.
+    calVer: 5,         // bump to discard samples gathered in the old power scale
+    aimA: 0.830, aimB: 0.004,
     samples: [],       // [powerFraction, landingFraction] pairs, newest last
     collapsed: false,
     hidden: false
   }, JSON.parse(localStorage.getItem(KEY) || '{}'));
-  if (cfg.calVer !== 4) { cfg.calVer = 4; cfg.samples = []; cfg.aimA = 0.858; cfg.aimB = 0.013; }
+  if (cfg.calVer !== 5) { cfg.calVer = 5; cfg.samples = []; cfg.aimA = 0.830; cfg.aimB = 0.004; }
   let saveAt = 0;
   const save = () => localStorage.setItem(KEY, JSON.stringify(cfg));
   const saveSoon = () => { const t = performance.now(); if (t - saveAt > 1000) { saveAt = t; save(); } };
@@ -340,34 +344,89 @@
 
     const pad = Math.max(1, Math.round(w * 0.006));
     const cx0 = Math.max(x0, bestX - pad), cx1 = Math.min(x1, bestX + pad + 1);
-    let top = null, fillTop = null;
-    const rowAny = new Uint8Array(yHi - yLo);
+    // Per row: how many of the band's columns are pole, and how many are fill.
+    const n = yHi - yLo;
+    const rowN = new Uint8Array(n), rowRed = new Uint8Array(n);
+    let peak = 0;
     for (let y = yLo; y < yHi; y++) {
-      let any = false, red = false;
+      let c = 0, r = 0;
       for (let x = cx0; x < cx1; x++) {
         const [hu, s, v] = hsvAt(d, y * w + x);
-        if (isBobber(hu, s, v)) { red = true; any = true; }
-        else if (isCase(hu, s, v)) any = true;
+        if (isBobber(hu, s, v)) { r++; c++; }
+        else if (isCase(hu, s, v)) c++;
       }
-      if (any) { rowAny[y - yLo] = 1; if (top === null) top = y; }
-      if (red && fillTop === null) fillTop = y;
+      rowN[y - yLo] = c; rowRed[y - yLo] = r;
+      if (c > peak) peak = c;
     }
-    if (top === null) return null;
-    // The bottom is only trusted while rows stay contiguous with the pole
-    // (one-row gaps allowed for downscale dither): the dark PTS banner sits
-    // lower in the same columns at some layouts, and taking simply the last
-    // matching row would jump the gauge's base down onto it.
+    // A row is gauge only if enough of the band's WIDTH matches. The pole is a
+    // solid 3-4 columns at this sampling; the dark specks of foliage above it
+    // are one pixel wide. Taking simply the topmost matching row — which is
+    // what this did — let one of those specks sit in for the top of the gauge
+    // a third of a gauge too high, on the frames where it survived the
+    // downscale. Power is read as fill/height, so the same red bar measured
+    // 0.39 on one frame and 0.67 on the next, and the ruler drawn from the same
+    // two ends stretched to match. Over a 44-second recording the measured
+    // gauge height swung between 21 and 34 rows; with the width test and the
+    // walk below it stays at 21 in 92% of frames and never leaves 19-22.
+    const need = peak >= 2 ? Math.max(2, Math.ceil(peak / 2)) : 1;
+    const on = i => i >= 0 && i < n && rowN[i] >= need;
+
+    // Both ends are walked out from inside the pole rather than taken as the
+    // first and last matching row. Two things break the run and have to be
+    // stepped over: the row where the fill meets the track blends to a colour
+    // that matches neither mask, and the game draws a green marker line across
+    // the gauge. The gap to the foliage above is far longer than either, so
+    // bridging a couple of rows separates them cleanly.
+    const gapMax = Math.max(2, Math.round(h * 0.02));
+    const walk = (from, dir) => {
+      let cur = from;
+      for (;;) {
+        let next = -1;
+        for (let g = 1; g <= gapMax; g++) {
+          const y = cur + dir * g;
+          if (y < yLo || y >= yHi) break;
+          if (on(y - yLo)) { next = y; break; }
+        }
+        if (next < 0) return cur;
+        cur = next;
+      }
+    };
+    // The base is sought from the lane row down, not up: the dark PTS banner
+    // sits lower in the same columns at some layouts.
     let bot = Math.min(lane.y, yHi - 1);
-    while (bot > top && !rowAny[bot - yLo]) bot--;
-    while (bot + 1 < yHi) {
-      if (rowAny[bot + 1 - yLo]) bot++;
-      else if (bot + 2 < yHi && rowAny[bot + 2 - yLo]) bot += 2;
-      else break;
-    }
+    while (bot > yLo && !on(bot - yLo)) bot--;
+    if (!on(bot - yLo)) return null;
+    bot = walk(bot, 1);
+    const top = walk(bot, -1);
     if (bot - top < 4) return null;
+    let fillTop = null;
+    const redNeed = Math.max(1, need - 1);
+    for (let y = top; y <= bot; y++) if (rowRed[y - yLo] >= redNeed) { fillTop = y; break; }
     const total = bot - top + 1;
     const fill = fillTop === null ? 0 : (bot - fillTop + 1);
-    return { top, bot, total, x: bestX, frac: Math.max(0, Math.min(1, fill / total)) };
+    return { top, bot, total, x: bestX, fillTop, frac: Math.max(0, Math.min(1, fill / total)) };
+  }
+
+  // The gauge is fixed furniture — it cannot move between frames — so its ends
+  // are held over a short window and the median taken, exactly as the lane is.
+  // A splash or a floating "+1 FISH" can cover part of the pole for a frame or
+  // two, and a gauge measured short reads the same red bar as far more power
+  // than it is. Holding the geometry and re-deriving only the fill removed
+  // every such outlier from the recording (worst case 6 rows for a 21-row
+  // gauge, i.e. triple the true power, on 1% of frames).
+  let meterHist = [];
+  function stableMeter(m, t) {
+    if (m) meterHist.push({ t, top: m.top, bot: m.bot });
+    meterHist = meterHist.filter(o => t - o.t < 1500);
+    if (!m || meterHist.length < 3) return m;
+    const tops = meterHist.map(o => o.top).sort((a, b) => a - b);
+    const bots = meterHist.map(o => o.bot).sort((a, b) => a - b);
+    const top = tops[tops.length >> 1], bot = bots[bots.length >> 1];
+    if (bot - top < 4) return m;
+    const total = bot - top + 1;
+    const fill = m.fillTop === null ? 0 : (bot - m.fillTop + 1);
+    return { top, bot, total, x: m.x, fillTop: m.fillTop,
+             frac: Math.max(0, Math.min(1, fill / total)) };
   }
 
   // ---------- blobs of a given colour on/near the lane ----------
@@ -485,7 +544,7 @@
     const L = (t - laneT > 700) ? (laneHist = [], null) : stableLane(raw, t, sh);
     lane = L;
     if (!lane) {
-      bobHist = []; hold = null;
+      bobHist = []; hold = null; meterHist = [];
       if (frame % 15 === 0) stEl.textContent = 'idle\nnot at the fishing spot';
       return;
     }
@@ -555,7 +614,7 @@
     }
 
     // ---- power meter ----
-    const m = readMeter(d, sw, sh, lane);
+    const m = stableMeter(readMeter(d, sw, sh, lane), t);
     if (m) {
       charge = m.frac;
       if (charge > 0.02) chargeSeen = t;
@@ -746,7 +805,7 @@
   $('#arcx').onchange  = e => { cfg.arc = e.target.checked; save(); };
   $('#ruler').onchange = e => { cfg.ruler = e.target.checked; save(); };
   $('#debug').onchange = e => { cfg.debug = e.target.checked; save(); };
-  $('#cal').onclick = () => { cfg.samples = []; cfg.aimA = 0.858; cfg.aimB = 0.013; save(); };
+  $('#cal').onclick = () => { cfg.samples = []; cfg.aimA = 0.830; cfg.aimB = 0.004; save(); };
   minBtn.onclick = () => { cfg.collapsed = !cfg.collapsed; save(); sync(); };
   nub.onclick = () => { cfg.hidden = false; save(); sync(); };
 
