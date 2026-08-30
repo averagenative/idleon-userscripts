@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         IdleOn Darts Helper
 // @namespace    nativerobot
-// @version      1.2
+// @version      1.3
 // @description  Draws the predicted dart path and where it lands on the board, wind included, for the Throwy Darts minigame
 // @match        https://www.legendsofidleon.com/*
 // @grant        none
@@ -51,7 +51,8 @@
     // third the size of cyan's and its direction read is unreliable — see v3
     // history in git. Zero measures best; not a claim that magenta does nothing.
     collapsed: false,
-    hidden: false
+    hidden: false,
+    px: null, py: null // dragged panel position, viewport px
   }, JSON.parse(localStorage.getItem(KEY) || '{}'));
   if (cfg.calVer !== 4) {
     cfg.calVer = 4; cfg.vN = 0.548; cfg.gN = 0.612; cfg.landN = -0.023;
@@ -125,6 +126,19 @@
   const ov = $('#ov'), octx = ov.getContext('2d');
   const dot = $('#dot'), runBtn = $('#run'), panel = $('#p'), stEl = $('#st'),
         nub = $('#nub'), body = $('#p > .body'), minBtn = $('#min');
+
+  // ---------- remembered panel position ----------
+  // Where the panel was dragged to is kept in the same config as everything
+  // else, so it comes back there on the next load instead of jumping to the
+  // corner it was built in. Clamped on the way in: a position saved on a wider
+  // window would otherwise put the panel off-screen, where the only way back is
+  // clearing localStorage.
+  if (cfg.px != null && cfg.py != null) {
+    const w = panel.offsetWidth || 220, h = 40;
+    panel.style.right = 'auto';
+    panel.style.left = Math.max(0, Math.min(cfg.px, window.innerWidth  - w)) + 'px';
+    panel.style.top  = Math.max(0, Math.min(cfg.py, window.innerHeight - h)) + 'px';
+  }
 
   function sync() {
     $('#path').checked = cfg.path; $('#band').checked = cfg.band;
@@ -453,6 +467,18 @@
     return { x: sx + gx * kx, y: sy + gy * ky, deg: sd / sw, reach: best.reach / scale };
   }
 
+  // ---------- debug probe ----------
+  // With tuning > Debug on, the measured values behind the drawing are
+  // published on window.__idleon.darts, refreshed every frame. That is what
+  // tools/replay reads back when replaying a recording, and what to look at in
+  // the console when the overlay is wrong but the status line looks fine — the
+  // status line rounds, and the numbers that decide everything — the board and the wind — never
+  // appear in it at all. Costs nothing while debug is off.
+  const probe = o => {
+    if (!cfg.debug) return;
+    (window.__idleon = window.__idleon || {}).darts = o;
+  };
+
   // ---------- state ----------
   let frame = 0, board = null, boardT = 0, wind = { key: 'none', deg: 0 };
   let aimDeg = null, aimT = 0, lastAim = null, lastAimF = -99;
@@ -493,7 +519,7 @@
     frame++;
     if (!cfg.on) return;
     const cv = gameCanvas();
-    if (!cv) { if (frame % 30 === 0) stEl.textContent = 'no game canvas'; return; }
+    if (!cv) { if (frame % 30 === 0) stEl.textContent = 'no game canvas'; probe({ frame, idle: 'no game canvas' }); return; }
 
     const rect = cv.getBoundingClientRect(), dpr = window.devicePixelRatio || 1;
     const W = rect.width, H = rect.height;
@@ -506,11 +532,12 @@
     octx.clearRect(0, 0, W, H);
 
     const I = grab(cv);
-    if (!I) { stEl.textContent = readErr; return; }
+    if (!I) { stEl.textContent = readErr; probe({ frame, idle: readErr }); return; }
 
     if (wallFrac(I) < 0.35) {
       board = null; dartPts = []; aimDeg = null;
       if (frame % 15 === 0) stEl.textContent = 'idle\nnot in Throwy Darts';
+      probe({ frame, idle: 'gated out: wall < 35%' });
       return;
     }
 
@@ -618,6 +645,11 @@
           ? `aim ${aimDeg.toFixed(0)}°${hitBand ? ` → ${hitBand.name}` : ''}`
           : 'no dart in hand');
     }
+
+    probe({
+      frame, board, wind, aimDeg, hand, hitBand, hitY, dart: dartPts.length,
+      cal: { vN: cfg.vN, gN: cfg.gN, windK: cfg.windK, landN: cfg.landN }
+    });
   }
 
   // ---------- wiring ----------
@@ -647,7 +679,13 @@
       panel.style.left = (e.clientX - dx) + 'px';
       panel.style.top = (e.clientY - dy) + 'px';
     });
-    window.addEventListener('mouseup', () => drag = false);
+    window.addEventListener('mouseup', () => {
+      if (!drag) return;
+      drag = false;
+      const r = panel.getBoundingClientRect();
+      cfg.px = Math.round(r.left); cfg.py = Math.round(r.top);
+      save();
+    });
   })();
 
   // Keep every control out of the tab order and drop focus as soon as it is

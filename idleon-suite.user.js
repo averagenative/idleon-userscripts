@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         IdleOn Helper Suite
 // @namespace    nativerobot
-// @version      1.0
+// @version      1.1
 // @description  All-in-one: autoclicker + Hoops, Fishing and Darts minigame helpers for Legends of IdleOn, each one individually switchable
 // @match        https://www.legendsofidleon.com/*
 // @grant        none
@@ -166,6 +166,9 @@
              background: var(--ac); opacity: .55; cursor: pointer;
              pointer-events: auto; display: none; }
       #nub:hover { opacity: 1; }
+      .eye { background:none; border:0; color: var(--ac); cursor:pointer; padding:0 2px;
+             font-size:11px; line-height:1; }
+      .eye.off { color:#374151; }
       details summary { color:#4b5563; cursor:pointer; font-size:11px; outline:none; }
       details .body { padding:7px 0 0; gap:6px; }
       hr { border:0; border-top:1px solid #2a2f37; margin:1px 0; }`;
@@ -198,13 +201,34 @@
     // Layout: the slot is where the panel sits until it is dragged, after
     // which its own position is remembered — five panels is too many to
     // re-arrange every session.
+    //
+    // Everything is clamped to the viewport, saved positions and default slots
+    // alike. A position saved on a wider window, or a default slot on a narrow
+    // one, otherwise puts a panel where it cannot be reached or dragged back —
+    // and the only cure left is clearing localStorage.
     panel.style.width = def.slot.width + 'px';
-    panel.style.top = (cfg.py != null ? cfg.py : def.slot.top) + 'px';
-    if (cfg.px != null) panel.style.left = cfg.px + 'px';
-    else if (def.slot.right != null) panel.style.right = def.slot.right + 'px';
-    else panel.style.left = def.slot.left + 'px';
     nub.style.top = '6px';
     nub.style.left = def.slot.nub + 'px';
+
+    function place() {
+      const w = def.slot.width, h = 40;
+      if (cfg.px != null && cfg.py != null) {
+        panel.style.right = 'auto';
+        panel.style.left = Math.max(0, Math.min(cfg.px, window.innerWidth - w)) + 'px';
+        panel.style.top = Math.max(0, Math.min(cfg.py, window.innerHeight - h)) + 'px';
+        return;
+      }
+      panel.style.top = Math.max(0, Math.min(def.slot.top, window.innerHeight - h)) + 'px';
+      if (def.slot.right != null && def.slot.right + w <= window.innerWidth) {
+        panel.style.left = 'auto';
+        panel.style.right = def.slot.right + 'px';
+      } else {
+        panel.style.right = 'auto';
+        panel.style.left = Math.max(0, Math.min(def.slot.left != null ? def.slot.left
+                                                : window.innerWidth - w - def.slot.right, window.innerWidth - w)) + 'px';
+      }
+    }
+    place();
 
     // Listeners are tracked so a helper that gets switched off leaves nothing
     // behind on window or document.
@@ -245,6 +269,12 @@
 
     const ui = {
       def, cfg, root, $, panel, ov, octx, on, chrome,
+      // The way back from a panel that has been dragged somewhere unreachable,
+      // or left off-screen by a window that has since been made narrower.
+      reset() {
+        cfg.px = null; cfg.py = null; cfg.hidden = false; cfg.collapsed = false;
+        ui.save(); place(); chrome();
+      },
       dot: $('#dot'), runBtn: $('#run'), stEl: $('#st'), nub, minBtn, body,
       save: () => {},          // replaced by the module, which owns its store
       // Keep every control out of the tab order and drop focus as soon as it
@@ -877,6 +907,18 @@
         return [h, mx ? d / mx : 0, mx / 255];
       }
 
+      // ---------- debug probe ----------
+      // With tuning > Debug on, the measured values behind the drawing are
+      // published on window.__idleon.hoops, refreshed every frame. That is what
+      // tools/replay reads back when replaying a recording, and what to look at in
+      // the console when the overlay is wrong but the status line looks fine — the
+      // status line rounds, and the numbers that decide everything — the rim and platform anchors — never
+      // appear in it at all. Costs nothing while debug is off.
+      const probe = o => {
+        if (!cfg.debug) return;
+        (window.__idleon = window.__idleon || {}).hoops = o;
+      };
+
       // ---------- state ----------
       let plat = null, platT = 0;    // the platform, re-found every frame
       let holdT = -1e9;              // last time a ball was seen in your hands
@@ -1064,7 +1106,7 @@
         if (!cfg.on) return;
 
         const cv = gameCanvas();
-        if (!cv) { if (frame % 30 === 0) stEl.textContent = 'no game canvas found'; return; }
+        if (!cv) { if (frame % 30 === 0) stEl.textContent = 'no game canvas found'; probe({ frame, idle: 'no game canvas' }); return; }
 
         const rect = cv.getBoundingClientRect();
         const dpr = window.devicePixelRatio || 1;
@@ -1078,7 +1120,7 @@
         octx.clearRect(0, 0, W, H);
 
         const img = grab(cv);
-        if (!img) { stEl.textContent = readErr; return; }
+        if (!img) { stEl.textContent = readErr; probe({ frame, idle: readErr }); return; }
 
         const k = W / img.sw;                                   // downscaled px -> CSS px
         // Only draw inside Swishy Hoops — otherwise the overworld's orange scenery
@@ -1087,6 +1129,7 @@
           tracks = []; lastRim = null; plat = null; flightPlat = null; holdT = -1e9;
           calSamples = [];
           if (frame % 15 === 0) stEl.textContent = 'idle\nnot in Swishy Hoops';
+          probe({ frame, idle: 'gated out: sky < 55%' });
           return;
         }
 
@@ -1250,6 +1293,12 @@
           const rimSt = lastRim ? 'rim' : `NO RIM ${rimWhy}`;
           stEl.textContent = `${cal}\n${what} · ${rimSt} · ${plat ? 'platform' : 'NO PLATFORM'}`;
         }
+
+        probe({
+          frame, plat, rim: lastRim, rimWhy, blobs: cands.length, tracks: tracks.length,
+          flying, made, ready, ghostMade,
+          cal: { a: cfg.shotA, l: cfg.shotL, r: cfg.shotR, seeded: cfg.calSeeded }
+        });
       }
       // ---------- wiring ----------
       // A button that has been clicked keeps keyboard focus, and the minigame is
@@ -1693,6 +1742,18 @@
       // good as the current calibration, same as the aim marker.
       const invAim = f => cfg.aimA > 0.05 ? Math.max(0, Math.min(1, (f - cfg.aimB) / cfg.aimA)) : null;
 
+      // ---------- debug probe ----------
+      // With tuning > Debug on, the measured values behind the drawing are
+      // published on window.__idleon.fishing, refreshed every frame. That is what
+      // tools/replay reads back when replaying a recording, and what to look at in
+      // the console when the overlay is wrong but the status line looks fine — the
+      // status line rounds, and the numbers that decide everything — the gauge's two ends — never
+      // appear in it at all. Costs nothing while debug is off.
+      const probe = o => {
+        if (!cfg.debug) return;
+        (window.__idleon = window.__idleon || {}).fishing = o;
+      };
+
       // ---------- state ----------
       let frame = 0, lane = null, laneT = 0;
       let bob = null, bobHist = [], lastBobT = 0;
@@ -1719,7 +1780,7 @@
         frame++;
         if (!cfg.on) return;
         const cv = gameCanvas();
-        if (!cv) { if (frame % 30 === 0) stEl.textContent = 'no game canvas'; return; }
+        if (!cv) { if (frame % 30 === 0) stEl.textContent = 'no game canvas'; probe({ frame, idle: 'no game canvas' }); return; }
 
         const rect = cv.getBoundingClientRect(), dpr = window.devicePixelRatio || 1;
         const W = rect.width, H = rect.height;
@@ -1732,7 +1793,7 @@
         octx.clearRect(0, 0, W, H);
 
         const img = grab(cv);
-        if (!img) { stEl.textContent = readErr; return; }
+        if (!img) { stEl.textContent = readErr; probe({ frame, idle: readErr }); return; }
         const { d, sw, sh } = img;
         const kx = W / sw, ky = H / sh;
         const t = performance.now();
@@ -1744,6 +1805,7 @@
         if (!lane) {
           bobHist = []; hold = null; meterHist = [];
           if (frame % 15 === 0) stEl.textContent = 'idle\nnot at the fishing spot';
+          probe({ frame, idle: 'no lane' });
           return;
         }
 
@@ -1977,6 +2039,14 @@
                       : `${fish.length} fish · ${haz.length} hazards`;
           stEl.textContent = cal + '\n' + line2;
         }
+
+        probe({
+          frame, lane, meter: m, charge,
+          aimAt: aimX === null ? null : (aimX - laneX0) / laneW,
+          landAt: landX === null ? null : (landX - laneX0) / laneW,
+          fish: fish.length, haz: haz.length,
+          cal: { a: cfg.aimA, b: cfg.aimB, n: cfg.samples.length }
+        });
       }
       // ---------- wiring ----------
       const toggle = () => { cfg.on = !cfg.on; if (!cfg.on) bobHist = []; save(); sync(); };
@@ -2367,6 +2437,18 @@
         return { x: sx + gx * kx, y: sy + gy * ky, deg: sd / sw, reach: best.reach / scale };
       }
 
+      // ---------- debug probe ----------
+      // With tuning > Debug on, the measured values behind the drawing are
+      // published on window.__idleon.darts, refreshed every frame. That is what
+      // tools/replay reads back when replaying a recording, and what to look at in
+      // the console when the overlay is wrong but the status line looks fine — the
+      // status line rounds, and the numbers that decide everything — the board and the wind — never
+      // appear in it at all. Costs nothing while debug is off.
+      const probe = o => {
+        if (!cfg.debug) return;
+        (window.__idleon = window.__idleon || {}).darts = o;
+      };
+
       // ---------- state ----------
       let frame = 0, board = null, boardT = 0, wind = { key: 'none', deg: 0 };
       let aimDeg = null, aimT = 0, lastAim = null, lastAimF = -99;
@@ -2406,7 +2488,7 @@
         frame++;
         if (!cfg.on) return;
         const cv = gameCanvas();
-        if (!cv) { if (frame % 30 === 0) stEl.textContent = 'no game canvas'; return; }
+        if (!cv) { if (frame % 30 === 0) stEl.textContent = 'no game canvas'; probe({ frame, idle: 'no game canvas' }); return; }
 
         const rect = cv.getBoundingClientRect(), dpr = window.devicePixelRatio || 1;
         const W = rect.width, H = rect.height;
@@ -2419,11 +2501,12 @@
         octx.clearRect(0, 0, W, H);
 
         const I = grab(cv);
-        if (!I) { stEl.textContent = readErr; return; }
+        if (!I) { stEl.textContent = readErr; probe({ frame, idle: readErr }); return; }
 
         if (wallFrac(I) < 0.35) {
           board = null; dartPts = []; aimDeg = null;
           if (frame % 15 === 0) stEl.textContent = 'idle\nnot in Throwy Darts';
+          probe({ frame, idle: 'gated out: wall < 35%' });
           return;
         }
 
@@ -2531,6 +2614,11 @@
               ? `aim ${aimDeg.toFixed(0)}°${hitBand ? ` → ${hitBand.name}` : ''}`
               : 'no dart in hand');
         }
+
+        probe({
+          frame, board, wind, aimDeg, hand, hitBand, hitY, dart: dartPts.length,
+          cal: { vN: cfg.vN, gN: cfg.gN, windK: cfg.windK, landN: cfg.landN }
+        });
       }
       // ---------- wiring ----------
       const toggle = () => { cfg.on = !cfg.on; save(); sync(); };
@@ -2561,12 +2649,20 @@
     slot: { top: 12, left: 12, width: 196, nub: 6 },
     overlay: false,
     bodyHTML:
+      // Each row: the helper's name, its toggle hotkey, an eye that shows or
+      // hides that panel, and the tickbox that runs it at all. The eye is here
+      // because a hidden panel leaves only a 13px nub on screen to click, and
+      // nothing says which nub is which — so "where did my darts panel go" had
+      // no answer you could find by looking.
       MODULES.map(m =>
         `<div class="row"><label>${m.short}</label>` +
-        `<span><span class="hint">${m.keyHint}</span> <input id="en-${m.id}" type="checkbox"></span></div>`
+        `<span><span class="hint">${m.keyHint}</span> ` +
+        `<button class="eye" id="eye-${m.id}" data-m="${m.id}">\u25cf</button> ` +
+        `<input id="en-${m.id}" type="checkbox"></span></div>`
       ).join('\n        ') + `
         <hr>
         <button class="btn sm" id="panels">Hide all panels</button>
+        <button class="btn sm" id="reset">Reset panel layout</button>
         <div class="hint">unticking a helper stops it:<br>no panel, no readback, no hotkey</div>`
   };
 
@@ -2580,13 +2676,25 @@
     const anyShown = () => MODULES.some(m => live.has(m.id) && !m.cfg.hidden);
 
     function syncHub() {
-      for (const m of MODULES) hub.$('#en-' + m.id).checked = !!suite.enabled[m.id];
+      for (const m of MODULES) {
+        hub.$('#en-' + m.id).checked = !!suite.enabled[m.id];
+        const eye = hub.$('#eye-' + m.id), off = !live.has(m.id);
+        eye.textContent = m.cfg.hidden ? '\u25cb' : '\u25cf';
+        eye.title = m.cfg.hidden ? 'Show the ' + m.short + ' panel' : 'Hide the ' + m.short + ' panel';
+        eye.className = 'eye' + (off ? ' off' : '');
+      }
       hub.$('#panels').textContent = anyShown() ? 'Hide all panels' : 'Show all panels';
       hub.chrome();
     }
 
     for (const m of MODULES) {
       hub.$('#en-' + m.id).onchange = e => { setEnabled(m, e.target.checked); syncHub(); };
+      hub.$('#eye-' + m.id).onclick = () => {
+        m.cfg.hidden = !m.cfg.hidden; m.save();
+        const inst = live.get(m.id);
+        if (inst) inst.ui.chrome();
+        syncHub();
+      };
     }
     hub.$('#panels').onclick = () => {
       const hide = anyShown();
@@ -2595,6 +2703,19 @@
         const inst = live.get(m.id);
         if (inst) inst.ui.chrome();
       }
+      syncHub();
+    };
+
+    // Puts every panel back in its default slot, unhidden and unrolled —
+    // including the ones that are switched off, whose stored position would
+    // otherwise still be off-screen next time they are switched back on.
+    hub.$('#reset').onclick = () => {
+      for (const m of MODULES) {
+        const inst = live.get(m.id);
+        if (inst) inst.ui.reset();
+        else { m.cfg.px = null; m.cfg.py = null; m.cfg.hidden = false; m.cfg.collapsed = false; m.save(); }
+      }
+      hub.reset();
       syncHub();
     };
 

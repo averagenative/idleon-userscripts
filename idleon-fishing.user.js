@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         IdleOn Fishing Helper
 // @namespace    nativerobot
-// @version      1.8
+// @version      1.9
 // @description  Draws where your cast will land, plus fish and hazard markers, for the IdleOn fishing minigame
 // @match        https://www.legendsofidleon.com/*
 // @grant        none
@@ -45,7 +45,8 @@
     aimA: 0.830, aimB: 0.004,
     samples: [],       // [powerFraction, landingFraction] pairs, newest last
     collapsed: false,
-    hidden: false
+    hidden: false,
+    px: null, py: null // dragged panel position, viewport px
   }, JSON.parse(localStorage.getItem(KEY) || '{}'));
   if (cfg.calVer !== 5) { cfg.calVer = 5; cfg.samples = []; cfg.aimA = 0.830; cfg.aimB = 0.004; }
   let saveAt = 0;
@@ -117,6 +118,19 @@
   const ov = $('#ov'), octx = ov.getContext('2d');
   const dot = $('#dot'), runBtn = $('#run'), panel = $('#p'), stEl = $('#st'),
         nub = $('#nub'), body = $('#p > .body'), minBtn = $('#min');
+
+  // ---------- remembered panel position ----------
+  // Where the panel was dragged to is kept in the same config as everything
+  // else, so it comes back there on the next load instead of jumping to the
+  // corner it was built in. Clamped on the way in: a position saved on a wider
+  // window would otherwise put the panel off-screen, where the only way back is
+  // clearing localStorage.
+  if (cfg.px != null && cfg.py != null) {
+    const w = panel.offsetWidth || 220, h = 40;
+    panel.style.right = 'auto';
+    panel.style.left = Math.max(0, Math.min(cfg.px, window.innerWidth  - w)) + 'px';
+    panel.style.top  = Math.max(0, Math.min(cfg.py, window.innerHeight - h)) + 'px';
+  }
 
   function sync() {
     $('#aim').checked = cfg.aim; $('#marks').checked = cfg.marks;
@@ -494,6 +508,18 @@
   // good as the current calibration, same as the aim marker.
   const invAim = f => cfg.aimA > 0.05 ? Math.max(0, Math.min(1, (f - cfg.aimB) / cfg.aimA)) : null;
 
+  // ---------- debug probe ----------
+  // With tuning > Debug on, the measured values behind the drawing are
+  // published on window.__idleon.fishing, refreshed every frame. That is what
+  // tools/replay reads back when replaying a recording, and what to look at in
+  // the console when the overlay is wrong but the status line looks fine — the
+  // status line rounds, and the numbers that decide everything — the gauge's two ends — never
+  // appear in it at all. Costs nothing while debug is off.
+  const probe = o => {
+    if (!cfg.debug) return;
+    (window.__idleon = window.__idleon || {}).fishing = o;
+  };
+
   // ---------- state ----------
   let frame = 0, lane = null, laneT = 0;
   let bob = null, bobHist = [], lastBobT = 0;
@@ -521,7 +547,7 @@
     frame++;
     if (!cfg.on) return;
     const cv = gameCanvas();
-    if (!cv) { if (frame % 30 === 0) stEl.textContent = 'no game canvas'; return; }
+    if (!cv) { if (frame % 30 === 0) stEl.textContent = 'no game canvas'; probe({ frame, idle: 'no game canvas' }); return; }
 
     const rect = cv.getBoundingClientRect(), dpr = window.devicePixelRatio || 1;
     const W = rect.width, H = rect.height;
@@ -534,7 +560,7 @@
     octx.clearRect(0, 0, W, H);
 
     const img = grab(cv);
-    if (!img) { stEl.textContent = readErr; return; }
+    if (!img) { stEl.textContent = readErr; probe({ frame, idle: readErr }); return; }
     const { d, sw, sh } = img;
     const kx = W / sw, ky = H / sh;
     const t = performance.now();
@@ -546,6 +572,7 @@
     if (!lane) {
       bobHist = []; hold = null; meterHist = [];
       if (frame % 15 === 0) stEl.textContent = 'idle\nnot at the fishing spot';
+      probe({ frame, idle: 'no lane' });
       return;
     }
 
@@ -779,6 +806,14 @@
                   : `${fish.length} fish · ${haz.length} hazards`;
       stEl.textContent = cal + '\n' + line2;
     }
+
+    probe({
+      frame, lane, meter: m, charge,
+      aimAt: aimX === null ? null : (aimX - laneX0) / laneW,
+      landAt: landX === null ? null : (landX - laneX0) / laneW,
+      fish: fish.length, haz: haz.length,
+      cal: { a: cfg.aimA, b: cfg.aimB, n: cfg.samples.length }
+    });
   }
 
   function solve3(M, V) {
@@ -821,7 +856,13 @@
       panel.style.left = (e.clientX - dx) + 'px';
       panel.style.top = (e.clientY - dy) + 'px';
     });
-    window.addEventListener('mouseup', () => drag = false);
+    window.addEventListener('mouseup', () => {
+      if (!drag) return;
+      drag = false;
+      const r = panel.getBoundingClientRect();
+      cfg.px = Math.round(r.left); cfg.py = Math.round(r.top);
+      save();
+    });
   })();
 
   // Keep every control out of the tab order and drop focus as soon as it is

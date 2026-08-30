@@ -41,7 +41,7 @@ def region(name, start, end, drop_funcs=(), drop_lines=(), indent=4):
         i += 1
     return '\n'.join(out).rstrip('\n')
 
-CHROME = re.compile(r'^\s*(collapsed: false|hidden: false)\b')
+CHROME = re.compile(r'^\s*(collapsed: false|hidden: false|px: null)\b')
 
 def config(name, indent=4):
     """The defaults object body and the migration statements, verbatim."""
