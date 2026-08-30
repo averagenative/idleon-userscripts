@@ -1345,21 +1345,40 @@
         arc: true,         // dotted arc for a bobber already in the air
         ruler: true,       // numbered 0-8 graduations on the gauge and lane
         debug: false,
-        // landing = a * powerFraction + b, both as a fraction along the lane.
-        // v5: re-measured after the gauge-height bug below was fixed. Every sample
-        // gathered before that is worthless — readMeter's top edge could latch onto
-        // a speck of foliage a third of a gauge above the pole, so the same red bar
-        // reported anywhere between 39% and 67% power, at random, from frame to
-        // frame. Six casts off a 44-second recording, pairing the locked fill with
-        // where the bobber came to rest: residuals within 3.2% of the lane, mean
-        // 1.4%. The v4 pair (0.858 / 0.013) overshoots every one of them — mean
-        // 2.5% of the lane long, worst 5.9% — which is the fit soaking up the
-        // gauge error it was measured through.
-        calVer: 5,         // bump to discard samples gathered in the old power scale
-        aimA: 0.830, aimB: 0.004,
+        // landing = aim2*p^2 + aim1*p + aim0, p the gauge fill, result a fraction
+        // along the lane.
+        //
+        // v6: the mapping is a CURVE, not a line. Every version up to v5 fitted a
+        // straight line, and a line through this data has residuals that are
+        // positive at both ends and negative in the middle — the signature of
+        // fitting a curve with a ruler. It went unnoticed because the recording it
+        // was measured on only ever used 0.23-0.68 of the gauge, where a line is a
+        // fine approximation. A second recording covering 0.09-1.00 showed the
+        // ends pulling away: the v5 line under-predicted every long cast by 5-8%
+        // of the lane, all in the same direction. That is the "I have to release
+        // before the mark to hit anything far out" complaint, exactly.
+        //
+        // 19 casts across two fishing spots, powers 0.09 to 1.00, each pairing the
+        // locked gauge fill with where the bobber came to rest:
+        //
+        //   line       mean 2.2% of the lane, worst 3.9%, residuals still curved
+        //   parabola   mean 1.1% of the lane, worst 2.2%, no pattern left
+        //
+        // Both spots fall on the SAME curve, so this is the game's law and not a
+        // per-spot quirk — which also means the seed is worth trusting before any
+        // self-calibration has happened.
+        calVer: 6,         // bump to discard samples gathered under an older gauge
+        aim2: 0.3095, aim1: 0.5631, aim0: 0.0420,
         samples: [],       // [powerFraction, landingFraction] pairs, newest last
   }, cfg => {
-      if (cfg.calVer !== 5) { cfg.calVer = 5; cfg.samples = []; cfg.aimA = 0.830; cfg.aimB = 0.004; }
+      // Samples are (power, landing) pairs and would survive a change of model —
+      // but not a change of what "power" meant. Everything learned before v6 was
+      // paired with a gauge reading that could collapse, so it goes.
+      if (cfg.calVer !== 6) {
+        cfg.calVer = 6; cfg.samples = [];
+        cfg.aim2 = 0.3095; cfg.aim1 = 0.5631; cfg.aim0 = 0.0420;
+        delete cfg.aimA; delete cfg.aimB;
+      }
   });
 
   const FISHING = {
@@ -1595,7 +1614,6 @@
         // Per row: how many of the band's columns are pole, and how many are fill.
         const n = yHi - yLo;
         const rowN = new Uint8Array(n), rowRed = new Uint8Array(n);
-        let peak = 0;
         for (let y = yLo; y < yHi; y++) {
           let c = 0, r = 0;
           for (let x = cx0; x < cx1; x++) {
@@ -1604,20 +1622,27 @@
             else if (isCase(hu, s, v)) c++;
           }
           rowN[y - yLo] = c; rowRed[y - yLo] = r;
-          if (c > peak) peak = c;
         }
-        // A row is gauge only if enough of the band's WIDTH matches. The pole is a
-        // solid 3-4 columns at this sampling; the dark specks of foliage above it
-        // are one pixel wide. Taking simply the topmost matching row — which is
-        // what this did — let one of those specks sit in for the top of the gauge
-        // a third of a gauge too high, on the frames where it survived the
-        // downscale. Power is read as fill/height, so the same red bar measured
-        // 0.39 on one frame and 0.67 on the next, and the ruler drawn from the same
-        // two ends stretched to match. Over a 44-second recording the measured
-        // gauge height swung between 21 and 34 rows; with the width test and the
-        // walk below it stays at 21 in 92% of frames and never leaves 19-22.
-        const need = peak >= 2 ? Math.max(2, Math.ceil(peak / 2)) : 1;
-        const on = i => i >= 0 && i < n && rowN[i] >= need;
+        // One matching pixel in the row is enough. There WAS a width test here —
+        // "at least half as many columns as the widest row" — to keep single-pixel
+        // foliage specks from standing in for the top of the gauge. It was wrong,
+        // and it took a second fishing spot to show why: it measured the fill's
+        // apparent width against a peak taken from the TRACK, and the two masks
+        // are not comparable. isCase is loose (v<.55, s>.25) so a blended edge
+        // pixel still counts as track, while isBobber wants s>.55 and a blended
+        // edge pixel does not count as fill. The track therefore always looks
+        // wider than the fill, by about a column.
+        //
+        // On the spot it was tuned against, the fill was 2 columns and the test
+        // demanded 2 — it passed with nothing to spare. On a spot where the camera
+        // sits closer the gauge is narrower, the fill downscales to a SINGLE
+        // column, and every fill row failed: the gauge collapsed from 22 rows to 6
+        // and the power read 1.00 for a bar that was three-quarters full.
+        //
+        // What actually separates a gauge from a speck is not width, it is that a
+        // gauge is a long unbroken run and a speck is one or two isolated rows.
+        // The walk below tests exactly that, and it was already doing the work.
+        const on = i => i >= 0 && i < n && rowN[i] > 0;
 
         // Both ends are walked out from inside the pole rather than taken as the
         // first and last matching row. Two things break the run and have to be
@@ -1648,8 +1673,7 @@
         const top = walk(bot, -1);
         if (bot - top < 4) return null;
         let fillTop = null;
-        const redNeed = Math.max(1, need - 1);
-        for (let y = top; y <= bot; y++) if (rowRed[y - yLo] >= redNeed) { fillTop = y; break; }
+        for (let y = top; y <= bot; y++) if (rowRed[y - yLo] > 0) { fillTop = y; break; }
         const total = bot - top + 1;
         const fill = fillTop === null ? 0 : (bot - fillTop + 1);
         return { top, bot, total, x: bestX, fillTop, frac: Math.max(0, Math.min(1, fill / total)) };
@@ -1727,20 +1751,61 @@
       }
 
       // ---------- aim calibration ----------
+      // A parabola needs its samples spread out to be worth fitting: six casts all
+      // at half power pin the middle and let the ends fly anywhere, which is a
+      // worse predictor than the seed they replaced. So the quadratic is only
+      // accepted with enough samples over a wide enough range of the gauge, and a
+      // straight line is fitted below that — still better than nothing, and it
+      // cannot bend the wrong way.
       function refitAim() {
         const S = cfg.samples;
         if (S.length < 3) return;
-        let n = 0, sx = 0, sy = 0, sxx = 0, sxy = 0;
-        for (const [p, l] of S) { n++; sx += p; sy += l; sxx += p * p; sxy += p * l; }
-        const den = n * sxx - sx * sx;
-        if (Math.abs(den) < 1e-6) return;
-        const a = (n * sxy - sx * sy) / den, b = (sy - a * sx) / n;
-        if (a > 0.15 && a < 2.5 && b > -0.6 && b < 0.6) { cfg.aimA = a; cfg.aimB = b; }
+        const ps = S.map(s => s[0]);
+        const span = Math.max(...ps) - Math.min(...ps);
+        let c2 = 0, c1, c0;
+
+        if (S.length >= 8 && span > 0.35) {
+          let s0 = S.length, s1 = 0, s2 = 0, s3 = 0, s4 = 0, y0 = 0, y1 = 0, y2 = 0;
+          for (const [p, l] of S) {
+            const p2 = p * p;
+            s1 += p; s2 += p2; s3 += p2 * p; s4 += p2 * p2;
+            y0 += l; y1 += p * l; y2 += p2 * l;
+          }
+          const sol = solve3([[s4, s3, s2], [s3, s2, s1], [s2, s1, s0]], [y2, y1, y0]);
+          if (sol) [c2, c1, c0] = sol;
+        }
+        if (!c2) {
+          let n = 0, sx = 0, sy = 0, sxx = 0, sxy = 0;
+          for (const [p, l] of S) { n++; sx += p; sy += l; sxx += p * p; sxy += p * l; }
+          const den = n * sxx - sx * sx;
+          if (Math.abs(den) < 1e-6) return;
+          c1 = (n * sxy - sx * sy) / den;
+          c0 = (sy - c1 * sx) / n;
+        }
+
+        // Reject anything that is not a sane cast curve: it has to rise all the way
+        // across the gauge and stay on the lane. A fit that dips in the middle, or
+        // sends full power off the end, is overfitted noise — keep what we had.
+        const at = p => c2 * p * p + c1 * p + c0;
+        const slope = p => 2 * c2 * p + c1;
+        if (slope(0) <= 0 || slope(1) <= 0) return;
+        if (at(0) < -0.15 || at(0) > 0.35 || at(1) < 0.5 || at(1) > 1.3) return;
+        cfg.aim2 = c2; cfg.aim1 = c1; cfg.aim0 = c0;
       }
-      const aimFrac = p => Math.max(0, Math.min(1, cfg.aimA * p + cfg.aimB));
+
+      const aimFrac = p => Math.max(0, Math.min(1, cfg.aim2 * p * p + cfg.aim1 * p + cfg.aim0));
+
       // Inverse of the mapping: what power lands ON a given lane fraction. Only as
-      // good as the current calibration, same as the aim marker.
-      const invAim = f => cfg.aimA > 0.05 ? Math.max(0, Math.min(1, (f - cfg.aimB) / cfg.aimA)) : null;
+      // good as the current calibration, same as the aim marker. The curve rises
+      // across the whole gauge (refitAim will not accept one that does not), so the
+      // root wanted is always the one from the positive branch.
+      const invAim = f => {
+        const a = cfg.aim2, b = cfg.aim1, c = cfg.aim0 - f;
+        if (Math.abs(a) < 1e-6) return Math.abs(b) > 0.05 ? Math.max(0, Math.min(1, -c / b)) : null;
+        const disc = b * b - 4 * a * c;
+        if (disc < 0) return null;
+        return Math.max(0, Math.min(1, (-b + Math.sqrt(disc)) / (2 * a)));
+      };
 
       // ---------- debug probe ----------
       // With tuning > Debug on, the measured values behind the drawing are
@@ -2044,8 +2109,12 @@
           frame, lane, meter: m, charge,
           aimAt: aimX === null ? null : (aimX - laneX0) / laneW,
           landAt: landX === null ? null : (landX - laneX0) / laneW,
+          // Where the bobber actually IS, as a fraction of the lane. The one
+          // number that says whether the mapping is right: park a cast, read this,
+          // compare with the aimAt that was showing when it was released.
+          bobAt: landed ? (landed.x - laneX0) / laneW : null,
           fish: fish.length, haz: haz.length,
-          cal: { a: cfg.aimA, b: cfg.aimB, n: cfg.samples.length }
+          cal: { c2: cfg.aim2, c1: cfg.aim1, c0: cfg.aim0, n: cfg.samples.length }
         });
       }
       // ---------- wiring ----------
@@ -2056,7 +2125,11 @@
       $('#arcx').onchange  = e => { cfg.arc = e.target.checked; save(); };
       $('#ruler').onchange = e => { cfg.ruler = e.target.checked; save(); };
       $('#debug').onchange = e => { cfg.debug = e.target.checked; save(); };
-      $('#cal').onclick = () => { cfg.samples = []; cfg.aimA = 0.830; cfg.aimB = 0.004; save(); };
+      $('#cal').onclick = () => {
+        cfg.samples = [];
+        cfg.aim2 = 0.3095; cfg.aim1 = 0.5631; cfg.aim0 = 0.0420;
+        save();
+      };
 
       return { loop, sync, toggle };
     }

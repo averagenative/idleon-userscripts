@@ -164,9 +164,20 @@ Fishing is a click-and-hold power bar: the longer you hold, the further the bobb
 
 The power-to-distance mapping is seeded from measured casts and then refit from your own — every cast that lands is recorded as a `(power, landing)` pair (20 kept, in `fish_cfg`). Straight out of the box the marker lands within about 3% of the lane, and it tightens as you fish. **Reset aim calibration** clears the learned pairs.
 
-> **v1.8 fixes a gauge-reading bug that made the ruler wander.** The top of the power gauge was taken as the topmost pixel in the column that matched the pole's colour — and a single speck of dark foliage a third of a gauge above the pole matched it, on whichever frames it survived the downscale. So the gauge's measured height jumped between 21 and 34 rows with nothing changing on screen, and since power is read as fill ÷ height, the same red bar reported anywhere from 39% to 67%. The ruler, drawn from those same two ends, stretched to match.
+> **v1.8–v2.0 fixed two things that made the marker miss.**
 >
-> The top and bottom are now walked out from inside the pole, a row only counts if enough of the gauge's *width* matches, and the gauge's ends are held over a short window the way the lane already was. Measured over a 44-second recording: the gauge reads 21 rows in 92% of frames and never leaves 19–22, against 20–34 before. The seed mapping was re-fit through the corrected gauge (six casts, residuals within 3.2% of the lane); the old seed overshot every one of them by 2.5% of the lane on average. **Learned pairs from before v1.8 are discarded on upgrade** — they were paired with power readings that were wrong by up to 57%.
+> **The gauge was being measured wrong.** Its top was taken as the topmost pixel matching the pole's colour, and a speck of dark foliage a third of a gauge above the pole matched it on whichever frames survived the downscale — so the measured height jumped between 21 and 34 rows with nothing changing on screen. Power is read as fill ÷ height, so the same red bar reported anywhere from 39% to 67%. A first fix added a width test, which then broke a *second* fishing spot where the camera sits closer: there the fill downscales to a single column, every row failed the test, and a three-quarters-full bar read as 100%. Width was the wrong discriminator — a gauge is a long unbroken run and a speck is one isolated row, so the run is what gets tested now. Across two recordings at two spots the gauge reads 22 rows in 97% of frames and never leaves 21–23.
+>
+> **The mapping is a curve, not a line.** Every version up to v1.9 fitted a straight line to power → landing. A line through the real data has residuals that are positive at both ends and negative in the middle — the signature of fitting a curve with a ruler. It hid for a long time because the first recording only ever used 0.23–0.68 of the gauge, where a line is a fine approximation. A second recording covering 0.09–1.00 showed the ends pulling away: **every long cast landed 5–8% of the lane further than the marker said, all in the same direction** — which is exactly the "I have to release before the mark to hit anything far out" complaint.
+>
+> Measured over 19 casts at two spots, powers 0.09 to 1.00:
+>
+> | model | mean error | worst |
+> |---|---|---|
+> | line (v1.9) | 2.6% of the lane | 7.6% |
+> | parabola (v2.0) | **1.1% of the lane** | **2.2%** |
+>
+> Both spots fall on the same curve, so this is the game's law rather than a per-spot quirk — the seed is worth trusting before any self-calibration has happened. The long-cast bias is gone: errors above 0.8 power now split evenly either side instead of all running long. Learned pairs from before v2.0 are discarded on upgrade, since they were paired with power readings that could collapse.
 
 **F4** toggles the helper, **F3** hides the panel.
 
