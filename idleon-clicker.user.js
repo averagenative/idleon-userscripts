@@ -1,7 +1,9 @@
 // ==UserScript==
 // @name         IdleOn Clicker
 // @namespace    nativerobot
-// @version      3.4
+// @version      3.5
+// @downloadURL https://raw.githubusercontent.com/averagenative/idleon-userscripts/main/idleon-clicker.user.js
+// @updateURL   https://raw.githubusercontent.com/averagenative/idleon-userscripts/main/idleon-clicker.user.js
 // @description  Stealthy in-page autoclicker panel for Legends of IdleOn (browser)
 // @match        https://www.legendsofidleon.com/*
 // @grant        none

@@ -53,7 +53,15 @@ It renders a small draggable control panel over the game and fires synthetic mou
 3. Tampermonkey detects the `.user.js` and opens its install tab — click **Install**.
 4. Go to <https://www.legendsofidleon.com/> and load the game. The panel appears in the top-right.
 
-To update later, just open the raw link again and re-install (Tampermonkey can also auto-check if you enable it).
+### Updating
+
+Every script declares `@updateURL`, so Tampermonkey polls this repo on its own — but only on its update interval, which defaults to **once a day**. To pull a change immediately, do any of:
+
+- **Open the raw link again.** Tampermonkey intercepts the `.user.js`, shows you a diff, and offers **Update**. Instant, and works no matter how the script was installed.
+- **Dashboard → Installed Userscripts → click the "Last updated" timestamp** for that script. That checks just that one.
+- **Dashboard → Settings → Config mode: Advanced → Externals/Update → check interval**, to make automatic checks more frequent.
+
+Two things that look like a broken update but aren't: `raw.githubusercontent.com` is CDN-cached for about five minutes, so a change pushed a moment ago may not be visible yet; and Tampermonkey only updates when `@version` **increases**, which is why the build refuses to ship suite content without bumping it.
 
 ### Manual install (alternative)
 
