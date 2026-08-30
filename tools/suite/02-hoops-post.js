@@ -1,0 +1,4 @@
+
+      return { loop, sync, toggle };
+    }
+  };

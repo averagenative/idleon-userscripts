@@ -1,15 +1,36 @@
-# IdleOn userscripts
+# IdleOn userscripts — autoclicker and minigame helpers
 
-Four independent Tampermonkey userscripts for the browser version of Legends of IdleOn:
+Tampermonkey userscripts for the browser version of **Legends of IdleOn**: an autoclicker, and minigame helper overlays that show you where a shot, cast or dart is going to land.
 
+- **[IdleOn Helper Suite](#idleon-helper-suite)** — all four in one install, each individually switchable. **Start here.**
 - **[IdleOn Clicker](#idleon-clicker)** — a stealthy autoclicker panel.
 - **[Hoops Helper](#hoops-helper)** — a dotted-line shot preview for the Swishy Hoops minigame.
 - **[Fishing Helper](#fishing-helper)** — a landing-spot aim marker for the fishing minigame.
 - **[Darts Helper](#darts-helper)** — an aim path and hit-band readout for Throwy Darts.
 
-The three helpers **only draw**. They never click, move the mouse, or send input to the game.
+The three minigame helpers **only draw**. They never click, move the mouse, or send input to the game.
 
-The helpers were built by measuring real gameplay footage: sprite colours, sizes and physics were read off recordings frame by frame rather than guessed, and the tracking and prediction code is replayed against that footage as a test.
+They were built by measuring real gameplay footage: sprite colours, sizes and physics were read off recordings frame by frame rather than guessed, and the tracking and prediction code is replayed against that footage as a test.
+
+# IdleOn Helper Suite
+
+**[`idleon-suite.user.js`](idleon-suite.user.js)** is the clicker and all three minigame helpers in a single userscript, with a **Suite** panel that switches each one on and off.
+
+Install it *instead of* the four scripts below, not alongside them — two copies of a helper means two panels and two overlays.
+
+**[Install idleon-suite.user.js](https://raw.githubusercontent.com/averagenative/idleon-userscripts/main/idleon-suite.user.js)** (same steps as [below](#install): open the raw link, Tampermonkey offers to install it.)
+
+Everything else on this page still applies — the panels, hotkeys, overlays and tuning are the same, and each helper keeps its own settings key (`ac_cfg`, `hoops_cfg`, `fish_cfg`, `darts_cfg`), so calibration learned by the standalone scripts carries straight over.
+
+What the merge adds:
+
+- **Unticking a helper stops it completely** — no panel, no pixel readback, no hotkey. The setting sticks across reloads.
+- **One animation frame drives all of them**, and the downscaled read of the game canvas is taken **once per frame and shared** instead of once per helper. Running all three minigame helpers together now costs about what one used to.
+- **Panel positions are remembered.** With five panels on screen that matters.
+- **Hide all panels** in one click, and every panel's nub still brings it back individually.
+- A helper that throws no longer dies silently: the error is caught, reported in that helper's own status line, and the others keep running.
+
+The suite is generated from the four standalone scripts rather than being a fork of them — the detection, physics and drawing code is the same code, so a fix in one lands in the other.
 
 # IdleOn Clicker
 
@@ -27,7 +48,7 @@ It renders a small draggable control panel over the game and fires synthetic mou
    - [Chrome / Edge / Brave](https://chromewebstore.google.com/detail/tampermonkey/dhdgffkkebhmkfjojejmpbldmpobfkfo)
    - [Firefox](https://addons.mozilla.org/firefox/addon/tampermonkey/)
 2. Open the raw script:
-   **[idleon-clicker.user.js](https://raw.githubusercontent.com/averagenative/idleon-clicker/main/idleon-clicker.user.js)**
+   **[idleon-clicker.user.js](https://raw.githubusercontent.com/averagenative/idleon-userscripts/main/idleon-clicker.user.js)**
 3. Tampermonkey detects the `.user.js` and opens its install tab — click **Install**.
 4. Go to <https://www.legendsofidleon.com/> and load the game. The panel appears in the top-right.
 
@@ -140,7 +161,11 @@ Fishing is a click-and-hold power bar: the longer you hold, the further the bobb
 
 ### Calibration
 
-The power-to-distance mapping is seeded from nine measured casts and then refit from your own — every cast that lands is recorded as a `(power, landing)` pair (20 kept, in `fish_cfg`). Straight out of the box the marker lands within roughly 10–15 px of the truth, and it tightens as you fish. **Reset aim calibration** clears the learned pairs.
+The power-to-distance mapping is seeded from measured casts and then refit from your own — every cast that lands is recorded as a `(power, landing)` pair (20 kept, in `fish_cfg`). Straight out of the box the marker lands within about 3% of the lane, and it tightens as you fish. **Reset aim calibration** clears the learned pairs.
+
+> **v1.8 fixes a gauge-reading bug that made the ruler wander.** The top of the power gauge was taken as the topmost pixel in the column that matched the pole's colour — and a single speck of dark foliage a third of a gauge above the pole matched it, on whichever frames it survived the downscale. So the gauge's measured height jumped between 21 and 34 rows with nothing changing on screen, and since power is read as fill ÷ height, the same red bar reported anywhere from 39% to 67%. The ruler, drawn from those same two ends, stretched to match.
+>
+> The top and bottom are now walked out from inside the pole, a row only counts if enough of the gauge's *width* matches, and the gauge's ends are held over a short window the way the lane already was. Measured over a 44-second recording: the gauge reads 21 rows in 92% of frames and never leaves 19–22, against 20–34 before. The seed mapping was re-fit through the corrected gauge (six casts, residuals within 3.2% of the lane); the old seed overshot every one of them by 2.5% of the lane on average. **Learned pairs from before v1.8 are discarded on upgrade** — they were paired with power readings that were wrong by up to 57%.
 
 **F4** toggles the helper, **F3** hides the panel.
 
