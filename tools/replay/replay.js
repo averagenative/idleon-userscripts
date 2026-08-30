@@ -20,6 +20,7 @@
 // --status         print the helper's own status line instead of the probe
 // --set k=v,...    seed config values, e.g. --set scale=8
 // --helper NAME    which helper's probe unprefixed --pick paths refer to
+// --budget MB      decode window size, default 192MB of raw frames
 // --json           one JSON object per frame
 
 const { execFileSync, spawnSync } = require('child_process');
@@ -90,17 +91,29 @@ if (args.crop) {
 }
 
 // ---------- frames ----------
-const vf = [`crop=${crop.w}:${crop.h}:${crop.x}:${crop.y}`];
-if (args.fps) vf.push(`fps=${args.fps}`);
-const ff = ['-v', 'error'];
-if (args.from) ff.push('-ss', String(args.from));
-if (args.to) ff.push('-to', String(args.to));
-ff.push('-i', videoPath, '-vf', vf.join(','), '-f', 'rawvideo', '-pix_fmt', 'rgba', '-');
-const raw = execFileSync('ffmpeg', ff, { maxBuffer: 1 << 30 });
+// Decoded a window at a time, not all at once. Raw RGBA is ~4MB a frame at
+// 1080p, so a minute of footage is several gigabytes — the first version of
+// this buffered the lot and died with ENOBUFS on a 78-second clip.
 const frameBytes = crop.w * crop.h * 4;
-const nFrames = Math.floor(raw.length / frameBytes);
 const fps = Number(args.fps) || 30;
-console.error(`# ${nFrames} frames at ${fps}fps from ${path.basename(videoPath)}`);
+const BUDGET = (Number(args.budget) || 128) * 1024 * 1024;
+const perChunk = Math.max(1, Math.floor(BUDGET / frameBytes));
+const chunkSecs = perChunk / fps;
+
+function decode(from, secs) {
+  const vf = [`crop=${crop.w}:${crop.h}:${crop.x}:${crop.y}`];
+  if (args.fps) vf.push(`fps=${args.fps}`);
+  const ff = ['-v', 'error', '-ss', String(from)];
+  if (secs != null) ff.push('-t', String(secs));
+  ff.push('-i', videoPath, '-vf', vf.join(','), '-f', 'rawvideo', '-pix_fmt', 'rgba', '-');
+  // Generous headroom: ffmpeg can emit a frame or two past the window's
+  // end, and going one frame over the buffer is an ENOBUFS, not a truncation.
+  return execFileSync('ffmpeg', ff, { maxBuffer: BUDGET * 2 });
+}
+
+const start = Number(args.from) || 0;
+const stop = args.to != null ? Number(args.to) : Infinity;
+console.error(`# decoding ${chunkSecs.toFixed(1)}s at a time from ${path.basename(videoPath)}`);
 
 // ---------- the fake browser ----------
 const game = dom.element('canvas', 'game');
@@ -155,9 +168,15 @@ const fmt = v => v == null ? '-' : typeof v === 'number' ? (Number.isInteger(v) 
 if (pick) console.log(['frame', 't'].concat(pick).join('\t'));
 let warnedNoProbe = false, announced = false;
 
-for (let i = 0; i < nFrames; i++) {
-  game.surface.data.set(raw.subarray(i * frameBytes, (i + 1) * frameBytes));
-  now = ((Number(args.from) || 0) + i / fps) * 1000;
+let i = 0;
+for (let at = start; at < stop; at += chunkSecs) {
+  const secs = Math.min(chunkSecs, stop - at);
+  const raw = decode(at, Number.isFinite(secs) ? secs : null);
+  const got = Math.floor(raw.length / frameBytes);
+  if (!got) break;
+  for (let j = 0; j < got; j++, i++) {
+  game.surface.data.set(raw.subarray(j * frameBytes, (j + 1) * frameBytes));
+  now = (start + i / fps) * 1000;
   const due = rafQueue.splice(0, rafQueue.length);
   for (const fn of due) fn(now);
 
@@ -187,4 +206,6 @@ for (let i = 0; i < nFrames; i++) {
   if (pick) console.log([i, t].concat(pick.map(look).map(fmt)).join('\t'));
   else if (args.json) console.log(JSON.stringify({ frame: i, t: +t, ...probe }));
   else console.log(`${i}\t${t}\t${JSON.stringify(probe)}`);
+  }
+  if (!Number.isFinite(secs)) break;
 }

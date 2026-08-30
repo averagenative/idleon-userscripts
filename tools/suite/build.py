@@ -98,5 +98,28 @@ chunks = [
     part('05-hub.js'),
 ]
 out = re.sub(r'\n{3,}', '\n\n', '\n'.join(chunks)) + '\n'
-(SRC / 'idleon-suite.user.js').write_text(out)
+
+# The suite's @version has to move whenever its content does, or Tampermonkey
+# never offers the update — and since its content is four other scripts, that
+# is every time any of them changes. Forgetting is the default. So the build
+# bumps it: if the body differs from what is on disk, the last number goes up.
+#
+# Idempotent by construction — the comparison ignores the version line, so
+# re-running the build on unchanged sources changes nothing, which is what lets
+# CI rebuild and diff against the committed file.
+VERSION = re.compile(r'^// @version\s+(\S+)', re.M)
+target = SRC / 'idleon-suite.user.js'
+if target.exists():
+    prev = target.read_text()
+    if VERSION.sub('', prev) != VERSION.sub('', out):
+        old_v = VERSION.search(prev).group(1)
+        parts = old_v.split('.')
+        parts[-1] = str(int(parts[-1]) + 1)
+        bumped = '.'.join(parts)
+        out = VERSION.sub(f'// @version      {bumped}', out, count=1)
+        print(f'suite content changed: @version {old_v} -> {bumped}')
+    else:
+        out = VERSION.sub(f'// @version      {VERSION.search(prev).group(1)}', out, count=1)
+
+target.write_text(out)
 print('wrote idleon-suite.user.js —', len(out.split('\n')), 'lines')
