@@ -27,7 +27,8 @@ What the merge adds:
 - **Unticking a helper stops it completely** — no panel, no pixel readback, no hotkey. The setting sticks across reloads.
 - **One animation frame drives all of them**, and the downscaled read of the game canvas is taken **once per frame and shared** instead of once per helper. Running all three minigame helpers together now costs about what one used to.
 - **Panel positions are remembered.** With five panels on screen that matters.
-- **Hide all panels** in one click, and every panel's nub still brings it back individually.
+- **Hide all panels** in one click, an eye per row to show or hide just one, and **Reset panel layout** to put everything back in its default slot, unhidden — the way out of "my darts panel is somewhere off screen and I can't find the dot".
+- **Panels can't strand themselves.** Saved positions and default slots are both clamped to the window, so a panel is never born, or restored, somewhere you can't drag it back from.
 - A helper that throws no longer dies silently: the error is caught, reported in that helper's own status line, and the others keep running.
 
 The suite is generated from the four standalone scripts rather than being a fork of them — the detection, physics and drawing code is the same code, so a fix in one lands in the other.
@@ -217,6 +218,29 @@ Turn on **Debug blobs** under *tuning* — every colour match gets outlined, whi
 - *Status seems to describe the wrong arc* — it doesn't: `aim` is the preview from where you're standing, `shot` is the ball already in the air, and after a miss both are on screen at once and both get reported. `NO RIM` in the status means makes cannot be flagged at all.
 - *Ball missed or flickering* — widen **Hue width**, or lower **Min sat**. These tune the ball mask only; the rim keeps its own thresholds so that chasing a cleaner ball can't quietly cost you the hoop.
 - *Choppy on a weak machine* — set sampling to **8×**.
+
+## Debugging
+
+Two tools, both dependency-free. Full notes in [`tools/replay/README.md`](tools/replay/README.md).
+
+**Replay a screen recording through the helper itself** — the code under test is the code that ships, so there is no reimplementation to keep in sync:
+
+```
+node tools/replay/replay.js --video clip.mp4 --script idleon-fishing.user.js \
+     --pick meter.top,meter.total,meter.frac,charge --from 5 --to 9
+```
+
+It finds the game canvas in the frame by itself, pumps the helper's loop a frame at a time, and prints what it measured. This is how the v1.8 gauge bug above was found and confirmed fixed — the gauge growing 12 rows between two frames is one line of output.
+
+**Read a live session** over the Chrome DevTools Protocol, for what a recording can't show you:
+
+```
+google-chrome --remote-debugging-port=9222 --user-data-dir=/tmp/idleon-debug \
+              https://www.legendsofidleon.com/
+node tools/chrome/attach.js --watch --pick fishing.meter.top,fishing.charge
+```
+
+Both read the same thing: with **tuning > Debug** ticked, each helper publishes its measured values on `window.__idleon.<helper>` every frame — the gauge's two ends, the rim and platform anchors, the wind, the live calibration. None of that appears in the status line, and it is what actually decides whether the overlay is right. You can read it straight from the DevTools console too.
 
 ## License
 

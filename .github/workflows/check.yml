@@ -1,0 +1,49 @@
+name: check
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Parse every userscript
+        run: for f in idleon-*.user.js; do node --check "$f"; done
+
+      # idleon-suite.user.js is generated from the four standalone scripts.
+      # Editing a standalone script without rebuilding leaves the suite quietly
+      # stale — the failure mode is a fix that works in one install and not the
+      # other, which is invisible until someone reports it. So the build runs
+      # here and the result has to match what was committed.
+      - name: Suite is up to date with its sources
+        run: |
+          python3 tools/suite/build.py
+          if ! git diff --quiet -- idleon-suite.user.js; then
+            echo "::error::idleon-suite.user.js is stale. Run: python3 tools/suite/build.py"
+            git diff --stat -- idleon-suite.user.js
+            exit 1
+          fi
+
+      - name: Version bumped alongside any script change
+        if: github.event_name == 'pull_request'
+        run: |
+          git fetch --depth=1 origin "${{ github.base_ref }}"
+          base="origin/${{ github.base_ref }}"
+          fail=0
+          for f in idleon-*.user.js; do
+            git diff --quiet "$base" -- "$f" && continue
+            old=$(git show "$base:$f" 2>/dev/null | sed -n 's|^// @version *||p')
+            new=$(sed -n 's|^// @version *||p' "$f")
+            if [ "$old" = "$new" ]; then
+              echo "::error file=$f::$f changed but @version is still $new — Tampermonkey will not offer the update"
+              fail=1
+            fi
+          done
+          exit $fail

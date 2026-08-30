@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         IdleOn Clicker
 // @namespace    nativerobot
-// @version      3.3
+// @version      3.4
 // @description  Stealthy in-page autoclicker panel for Legends of IdleOn (browser)
 // @match        https://www.legendsofidleon.com/*
 // @grant        none
@@ -20,7 +20,8 @@
     fx: 0, fy: 0,      // fixed target, viewport px (legacy / no-canvas fallback)
     fu: null, fv: null,// fixed target as a fraction of the game canvas rect
     collapsed: false,  // rolled up to just the title bar
-    hidden: false
+    hidden: false,
+    px: null, py: null // dragged panel position, viewport px
   }, JSON.parse(localStorage.getItem(KEY) || '{}'));
   // migrate old base+jitter config -> min/max range
   if (cfg.ivMin === undefined && cfg.interval !== undefined) {
@@ -99,6 +100,19 @@
   const dot = $('#dot'), runBtn = $('#run'), ivMinEl = $('#ivmin'), ivMaxEl = $('#ivmax'),
         jpEl = $('#jp'), xyEl = $('#xy'), setBtn = $('#set'), panel = $('#p'),
         nub = $('#nub'), body = $('.body'), minBtn = $('#min');
+
+  // ---------- remembered panel position ----------
+  // Where the panel was dragged to is kept in the same config as everything
+  // else, so it comes back there on the next load instead of jumping to the
+  // corner it was built in. Clamped on the way in: a position saved on a wider
+  // window would otherwise put the panel off-screen, where the only way back is
+  // clearing localStorage.
+  if (cfg.px != null && cfg.py != null) {
+    const w = panel.offsetWidth || 220, h = 40;
+    panel.style.right = 'auto';
+    panel.style.left = Math.max(0, Math.min(cfg.px, window.innerWidth  - w)) + 'px';
+    panel.style.top  = Math.max(0, Math.min(cfg.py, window.innerHeight - h)) + 'px';
+  }
 
   // ---------- UI sync ----------
   function sync() {
@@ -214,7 +228,13 @@
       panel.style.left = (e.clientX - dx) + 'px';
       panel.style.top  = (e.clientY - dy) + 'px';
     });
-    window.addEventListener('mouseup', () => drag = false);
+    window.addEventListener('mouseup', () => {
+      if (!drag) return;
+      drag = false;
+      const r = panel.getBoundingClientRect();
+      cfg.px = Math.round(r.left); cfg.py = Math.round(r.top);
+      save();
+    });
   })();
 
   // Keep every control out of the tab order and drop focus as soon as it is

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         IdleOn Hoops Helper
 // @namespace    nativerobot
-// @version      1.6
+// @version      1.7
 // @description  Dotted-line shot preview + live ball arc for the Swishy Hoops minigame in Legends of IdleOn
 // @match        https://www.legendsofidleon.com/*
 // @grant        none
@@ -66,7 +66,8 @@
     shotR: 0.557,      // landing range, fraction of width right of the platform
     calSeeded: true,
     collapsed: false,  // rolled up to just the title bar
-    hidden: false
+    hidden: false,
+    px: null, py: null // dragged panel position, viewport px
   }, JSON.parse(localStorage.getItem(KEY) || '{}'));
   // Calibration from an older build was learned per frame rather than per shot,
   // so whatever is stored is one arbitrary mid-flight fit — wrong rather than
@@ -160,6 +161,19 @@
   const ov = $('#ov'), octx = ov.getContext('2d');
   const dot = $('#dot'), runBtn = $('#run'), panel = $('#p'), stEl = $('#st'),
         nub = $('#nub'), body = $('#p > .body'), minBtn = $('#min');
+
+  // ---------- remembered panel position ----------
+  // Where the panel was dragged to is kept in the same config as everything
+  // else, so it comes back there on the next load instead of jumping to the
+  // corner it was built in. Clamped on the way in: a position saved on a wider
+  // window would otherwise put the panel off-screen, where the only way back is
+  // clearing localStorage.
+  if (cfg.px != null && cfg.py != null) {
+    const w = panel.offsetWidth || 220, h = 40;
+    panel.style.right = 'auto';
+    panel.style.left = Math.max(0, Math.min(cfg.px, window.innerWidth  - w)) + 'px';
+    panel.style.top  = Math.max(0, Math.min(cfg.py, window.innerHeight - h)) + 'px';
+  }
 
   function sync() {
     $('#span').value = cfg.span; $('#hue').value = cfg.hue; $('#huew').value = cfg.hueW;
@@ -451,6 +465,18 @@
     return [h, mx ? d / mx : 0, mx / 255];
   }
 
+  // ---------- debug probe ----------
+  // With tuning > Debug on, the measured values behind the drawing are
+  // published on window.__idleon.hoops, refreshed every frame. That is what
+  // tools/replay reads back when replaying a recording, and what to look at in
+  // the console when the overlay is wrong but the status line looks fine — the
+  // status line rounds, and the numbers that decide everything — the rim and platform anchors — never
+  // appear in it at all. Costs nothing while debug is off.
+  const probe = o => {
+    if (!cfg.debug) return;
+    (window.__idleon = window.__idleon || {}).hoops = o;
+  };
+
   // ---------- state ----------
   let plat = null, platT = 0;    // the platform, re-found every frame
   let holdT = -1e9;              // last time a ball was seen in your hands
@@ -655,7 +681,7 @@
     if (!cfg.on) return;
 
     const cv = gameCanvas();
-    if (!cv) { if (frame % 30 === 0) stEl.textContent = 'no game canvas found'; return; }
+    if (!cv) { if (frame % 30 === 0) stEl.textContent = 'no game canvas found'; probe({ frame, idle: 'no game canvas' }); return; }
 
     const rect = cv.getBoundingClientRect();
     const dpr = window.devicePixelRatio || 1;
@@ -669,7 +695,7 @@
     octx.clearRect(0, 0, W, H);
 
     const img = grab(cv);
-    if (!img) { stEl.textContent = readErr; return; }
+    if (!img) { stEl.textContent = readErr; probe({ frame, idle: readErr }); return; }
 
     const k = W / img.sw;                                   // downscaled px -> CSS px
     // Only draw inside Swishy Hoops — otherwise the overworld's orange scenery
@@ -678,6 +704,7 @@
       tracks = []; lastRim = null; plat = null; flightPlat = null; holdT = -1e9;
       calSamples = [];
       if (frame % 15 === 0) stEl.textContent = 'idle\nnot in Swishy Hoops';
+      probe({ frame, idle: 'gated out: sky < 55%' });
       return;
     }
 
@@ -841,6 +868,12 @@
       const rimSt = lastRim ? 'rim' : `NO RIM ${rimWhy}`;
       stEl.textContent = `${cal}\n${what} · ${rimSt} · ${plat ? 'platform' : 'NO PLATFORM'}`;
     }
+
+    probe({
+      frame, plat, rim: lastRim, rimWhy, blobs: cands.length, tracks: tracks.length,
+      flying, made, ready, ghostMade,
+      cal: { a: cfg.shotA, l: cfg.shotL, r: cfg.shotR, seeded: cfg.calSeeded }
+    });
   }
 
   // ---------- wiring ----------
@@ -896,7 +929,13 @@
       panel.style.left = (e.clientX - dx) + 'px';
       panel.style.top = (e.clientY - dy) + 'px';
     });
-    window.addEventListener('mouseup', () => drag = false);
+    window.addEventListener('mouseup', () => {
+      if (!drag) return;
+      drag = false;
+      const r = panel.getBoundingClientRect();
+      cfg.px = Math.round(r.left); cfg.py = Math.round(r.top);
+      save();
+    });
   })();
 
   root.querySelectorAll('input[type=number]').forEach(el => el.addEventListener('keydown', e => {

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         IdleOn Helper Suite
 // @namespace    nativerobot
-// @version      1.0
+// @version      1.1
 // @description  All-in-one: autoclicker + Hoops, Fishing and Darts minigame helpers for Legends of IdleOn, each one individually switchable
 // @match        https://www.legendsofidleon.com/*
 // @grant        none
@@ -166,6 +166,9 @@
              background: var(--ac); opacity: .55; cursor: pointer;
              pointer-events: auto; display: none; }
       #nub:hover { opacity: 1; }
+      .eye { background:none; border:0; color: var(--ac); cursor:pointer; padding:0 2px;
+             font-size:11px; line-height:1; }
+      .eye.off { color:#374151; }
       details summary { color:#4b5563; cursor:pointer; font-size:11px; outline:none; }
       details .body { padding:7px 0 0; gap:6px; }
       hr { border:0; border-top:1px solid #2a2f37; margin:1px 0; }`;
@@ -198,13 +201,34 @@
     // Layout: the slot is where the panel sits until it is dragged, after
     // which its own position is remembered — five panels is too many to
     // re-arrange every session.
+    //
+    // Everything is clamped to the viewport, saved positions and default slots
+    // alike. A position saved on a wider window, or a default slot on a narrow
+    // one, otherwise puts a panel where it cannot be reached or dragged back —
+    // and the only cure left is clearing localStorage.
     panel.style.width = def.slot.width + 'px';
-    panel.style.top = (cfg.py != null ? cfg.py : def.slot.top) + 'px';
-    if (cfg.px != null) panel.style.left = cfg.px + 'px';
-    else if (def.slot.right != null) panel.style.right = def.slot.right + 'px';
-    else panel.style.left = def.slot.left + 'px';
     nub.style.top = '6px';
     nub.style.left = def.slot.nub + 'px';
+
+    function place() {
+      const w = def.slot.width, h = 40;
+      if (cfg.px != null && cfg.py != null) {
+        panel.style.right = 'auto';
+        panel.style.left = Math.max(0, Math.min(cfg.px, window.innerWidth - w)) + 'px';
+        panel.style.top = Math.max(0, Math.min(cfg.py, window.innerHeight - h)) + 'px';
+        return;
+      }
+      panel.style.top = Math.max(0, Math.min(def.slot.top, window.innerHeight - h)) + 'px';
+      if (def.slot.right != null && def.slot.right + w <= window.innerWidth) {
+        panel.style.left = 'auto';
+        panel.style.right = def.slot.right + 'px';
+      } else {
+        panel.style.right = 'auto';
+        panel.style.left = Math.max(0, Math.min(def.slot.left != null ? def.slot.left
+                                                : window.innerWidth - w - def.slot.right, window.innerWidth - w)) + 'px';
+      }
+    }
+    place();
 
     // Listeners are tracked so a helper that gets switched off leaves nothing
     // behind on window or document.
@@ -245,6 +269,12 @@
 
     const ui = {
       def, cfg, root, $, panel, ov, octx, on, chrome,
+      // The way back from a panel that has been dragged somewhere unreachable,
+      // or left off-screen by a window that has since been made narrower.
+      reset() {
+        cfg.px = null; cfg.py = null; cfg.hidden = false; cfg.collapsed = false;
+        ui.save(); place(); chrome();
+      },
       dot: $('#dot'), runBtn: $('#run'), stEl: $('#st'), nub, minBtn, body,
       save: () => {},          // replaced by the module, which owns its store
       // Keep every control out of the tab order and drop focus as soon as it
