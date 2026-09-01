@@ -145,6 +145,17 @@ Learning now waits for a track spanning 20% of the canvas and stops at the first
 
 Predicting each measured shot from only the *other* shots (leave-one-out) lands within 48px, mean error 3px.
 
+**The anchor is the biggest error left, and it is not yet understood.** `arc`, `range` and the upward crossing are meant to describe *the shot*, so anchoring them to the platform should make them invariant to where the platform is. Measured across two independent runs read off the live game, they are not:
+
+| | corr(platY, upward crossing) | corr(platY, range) |
+|---|---|---|
+| 8 flights | −0.79 | +0.71 |
+| 5 flights | −0.86 | +0.77 |
+
+Curvature barely moves, which is the tell — it is set by `g / 2·vx²`, and neither of those cares how high the platform is, while the other two are where the arc meets platform *height*. Half the variance in the two weakest numbers tracks the anchor, and at 0.03 of canvas width each that is ~40px: the same order as the leave-one-out landing error. Three explanations have been measured and none survived — a stale anchor (a Δt sweep over −200…+400ms shows no minimum), the detector picking a different row as the platform moves (width was 177px in 2565 of 2566 frames), and the ball inheriting the platform's velocity (correlates worse than height, though the two are confounded on an oscillating platform). What remains is that the shot may not be fixed relative to the platform at all. Settling it needs the release instant, which nothing currently measures.
+
+Two further things are known but *not* the problem. The anchor's `y` snaps to a 5.5px grid, because `findPlatform` runs on the downscaled readback — that contributes about 4% of the observed spread, so it is not worth chasing. And the platform has never once been observed to move horizontally, so the horizontal half of the anchor is entirely untested; it first matters when the platform starts looping later in a run.
+
 Of the three numbers, `range` is the trustworthy one — it is the part of the arc the tracked points actually cover, and two independently measured seeds agree on it to 2%. The upward crossing is the weakest in any seed: it sits behind the point tracking begins, so no shot ever observes it directly and every estimate of it is an extrapolation. Its spread across shots is a quarter of its own value.
 
 Calibration is stored in `localStorage` (`hoops_cfg`) relative to canvas size, so it survives resizing the window. **Reset calibration** returns to the measured default. Calibration learned by an older build is discarded automatically via a version stamp — early builds tracked the wrong sprites and learned wrong numbers, and a wrong throw is worse than none.

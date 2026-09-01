@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         IdleOn Helper Suite
 // @namespace    nativerobot
-// @version      1.7
+// @version      1.8
 // @downloadURL https://raw.githubusercontent.com/averagenative/idleon-userscripts/main/idleon-suite.user.js
 // @updateURL   https://raw.githubusercontent.com/averagenative/idleon-userscripts/main/idleon-suite.user.js
 // @description  All-in-one: autoclicker + Hoops, Fishing and Darts minigame helpers for Legends of IdleOn, each one individually switchable
@@ -615,6 +615,40 @@
         // observes it directly and every estimate of it is an extrapolation. Its
         // own spread across shots is a quarter of its value. Treat a disagreement
         // there as unsettled rather than as this seed being right.
+        //
+        // KNOWN, UNEXPLAINED, and the biggest error left. These two are supposed to
+        // describe the SHOT, so anchoring to the platform should make them
+        // invariant to where the platform happens to be. They are not. Across two
+        // independent runs read off the live game:
+        //
+        //             corr(platY, shotL)   corr(platY, shotR)
+        //   8 flights        -0.79               +0.71
+        //   5 flights        -0.86               +0.77
+        //
+        // Curvature barely moves, which is the tell: shotA is set by g/2vx^2 and
+        // neither of those cares how high the platform is, while shotL and shotR
+        // are where the arc meets platform HEIGHT. Half the variance in the two
+        // weakest numbers tracks the anchor, and at .03 of canvas width each that
+        // is ~40px -- the same order as the leave-one-out landing error, so this is
+        // the thing to fix next, not the fitting.
+        //
+        // Three explanations have been measured and none survived:
+        //   - Stale anchor. flightPlat is sampled a frame or two after release and
+        //     the platform is moving (26 of 32 releases, ~135px/s, biased upward).
+        //     But recomputing L and R against the platform at release+dt over
+        //     -200..+400ms gives no minimum -- the spread falls monotonically and
+        //     is still falling at -200ms, which is before the ball left.
+        //   - The detector picking a different row of the platform as it moves.
+        //     The detected width was 177px in 2565 of 2566 logged frames.
+        //   - The ball inheriting the platform's velocity. platV correlates worse
+        //     than platY (-0.68 vs -0.86 for L), though on an oscillating platform
+        //     the two are confounded and 5 flights cannot separate them.
+        //
+        // What is left is that the shot may simply not be fixed relative to the
+        // platform -- if the character's jump reaches a height that is not purely
+        // platform-relative, the arc meets platform height further out when the
+        // platform sits lower, which is the observed sign. Settling it needs the
+        // release instant, which nothing currently measures.
         shotA: 2.233,      // curvature x canvas width
         shotL: -0.119,     // upward crossing, fraction of width left of the platform
         shotR: 0.547,      // landing range, fraction of width right of the platform
