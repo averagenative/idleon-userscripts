@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         IdleOn Fishing Helper
 // @namespace    nativerobot
-// @version      2.2
+// @version      2.3
 // @downloadURL https://raw.githubusercontent.com/averagenative/idleon-userscripts/main/idleon-fishing.user.js
 // @updateURL   https://raw.githubusercontent.com/averagenative/idleon-userscripts/main/idleon-fishing.user.js
 // @description  Draws where your cast will land, plus fish and hazard markers, for the IdleOn fishing minigame
@@ -761,8 +761,27 @@
       landed = bobs2.sort((a, b) => b.n - a.n)[0] || null;
       // The bobber is red too, so it lands in the hazard mask. Drop clusters
       // that coincide with it, and require the rest to be urchin-sized.
-      haz = merge(raw(isHazard, 30 * px * px), clump)
-        .filter(o => o.n >= 110 * px * px)
+      //
+      // Nothing is screened on size BEFORE the merge, and that is the point.
+      // merge() exists because "a single sprite often breaks into a few blobs
+      // (the urchin's spikes especially)" — but a 30px floor ran first and threw
+      // the spikes away before merge could put them back, so the merge could
+      // only ever reassemble a sprite that did not need reassembling. Measured
+      // live: an urchin holding 150 matching pixels shattered into fragments
+      // whose LARGEST was 7px, every one of them under the floor, and the lane
+      // reported zero hazards with an urchin sitting on it. Handing merge the
+      // raw blobs instead rebuilds it at 85px, clear of the 110*px*px screen
+      // that still runs after. blobs() already refuses anything under 3px, and
+      // that is the only pre-merge screen worth having.
+      //
+      // The trailing lane-start screen is the hazard pass's version of the
+      // species pass's startX: the beach umbrella at the left end is red and
+      // white, merges to 67px of its own, and clears the same 110*px*px floor.
+      // Today the padded search box happens to cut it off — its centre sits at
+      // -0.07 of the lane against a box reaching -0.05 — but two hundredths of
+      // a lane is not a margin, it is a coincidence.
+      haz = merge(raw(isHazard, 3), clump)
+        .filter(o => o.n >= 110 * px * px && o.x > laneX0)
         .filter(o => !landed || Math.abs(o.x - landed.x) > W * 0.02);
     }
     if (cfg.marks) {
