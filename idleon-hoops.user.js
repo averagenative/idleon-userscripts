@@ -132,6 +132,33 @@
     // within .21 of a standard deviation, so there is no real drift to model.
     // Score a per-shot correction per session, never across pooled sessions.
     //
+    // And be suspicious of the correlation itself. Measured on three separate
+    // captures the platform-height coupling to curvature came out at -0.13,
+    // -0.46 and -0.82; within the two halves of the third capture, -0.81 and
+    // -0.96. That is not one effect measured three times, it is what a
+    // correlation looks like at n = 6 to 12. Curvature is the one parameter the
+    // anchor cannot touch mathematically -- shotA is a*W straight off the fit
+    // and platform position never enters it -- so a coupling there has to be
+    // either real physics or a bias in the estimator, and the time domain says
+    // it is neither: across those same flights vx holds to 1.3% and neither vx
+    // nor the fitted g tracks platform height (-0.11 and -0.14). The physical
+    // curvature g/2vx^2 is constant. The wobble is sampling noise in medA.
+    //
+    // A slope cap was tried on the back of it -- refit y(x) using only the part
+    // of the arc below some |dy/dx|, on the theory that the steep tail is where
+    // the parameterisation degenerates and how much tail gets tracked depends
+    // on how high the platform was. On the capture it was derived from it looked
+    // excellent, spread 12.3% down to 5.1%. It does not replicate: no effect at
+    // all on a second capture, and on a third the single fit it rests on is
+    // catastrophic, 92% spread, because one whole-segment fit is exactly the
+    // thing the gated median exists to avoid. Not shipped.
+    //
+    // What IS stable: the gated median's own spread runs 4-12% depending on the
+    // session, against 47% before the screens went in. That is the honest state
+    // of it. Anything smaller than that needs more than a dozen flights per
+    // session to see, and every correction derived from a dozen has so far
+    // failed on the next dozen.
+    //
     // The ~55px of arc height at the rim is therefore the real accuracy ceiling
     // today, and it is per-shot noise in L and R rather than anything to do
     // with the anchor. Averaging across shots is what actually removes it,
