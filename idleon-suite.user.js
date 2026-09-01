@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         IdleOn Helper Suite
 // @namespace    nativerobot
-// @version      1.8
+// @version      1.9
 // @downloadURL https://raw.githubusercontent.com/averagenative/idleon-userscripts/main/idleon-suite.user.js
 // @updateURL   https://raw.githubusercontent.com/averagenative/idleon-userscripts/main/idleon-suite.user.js
 // @description  All-in-one: autoclicker + Hoops, Fishing and Darts minigame helpers for Legends of IdleOn, each one individually switchable
@@ -627,10 +627,28 @@
         //
         // Curvature barely moves, which is the tell: shotA is set by g/2vx^2 and
         // neither of those cares how high the platform is, while shotL and shotR
-        // are where the arc meets platform HEIGHT. Half the variance in the two
-        // weakest numbers tracks the anchor, and at .03 of canvas width each that
-        // is ~40px -- the same order as the leave-one-out landing error, so this is
-        // the thing to fix next, not the fitting.
+        // are where the arc meets platform HEIGHT.
+        //
+        // It looks like the lever and it is not. Modelling shotL as linear in
+        // platform height predicts it 43% better out of sample -- leave-one-out
+        // mean error 51.6px falls to 29.6px -- and shotR barely moves, 40.8 to
+        // 37.7px. But the number that decides a make is the height of the arc where
+        // it passes the RIM, and there the same comparison is:
+        //
+        //   constant, as shipped        mean 54.7px   worst 117.5px
+        //   linear in platform height   mean 53.0px   worst 113.9px
+        //
+        // Three percent. The errors in A, L and R are correlated and largely cancel
+        // by the time the curve reaches the rim, so a correction that plainly
+        // improves two of the three parameters buys almost nothing where it counts.
+        // Measured, not argued, and left unshipped on that basis: an unexplained
+        // empirical correction fitted on 11 flights from one player has to earn
+        // more than 3% before it goes in.
+        //
+        // The ~55px of arc height at the rim is therefore the real accuracy ceiling
+        // today, and it is per-shot noise in L and R rather than anything to do
+        // with the anchor. Averaging across shots is what actually removes it,
+        // which is what the commit weighting is for.
         //
         // Three explanations have been measured and none survived:
         //   - Stale anchor. flightPlat is sampled a frame or two after release and
