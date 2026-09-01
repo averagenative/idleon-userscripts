@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         IdleOn Helper Suite
 // @namespace    nativerobot
-// @version      1.9
+// @version      1.10
 // @downloadURL https://raw.githubusercontent.com/averagenative/idleon-userscripts/main/idleon-suite.user.js
 // @updateURL   https://raw.githubusercontent.com/averagenative/idleon-userscripts/main/idleon-suite.user.js
 // @description  All-in-one: autoclicker + Hoops, Fishing and Darts minigame helpers for Legends of IdleOn, each one individually switchable
@@ -644,6 +644,24 @@
         // Measured, not argued, and left unshipped on that basis: an unexplained
         // empirical correction fitted on 11 flights from one player has to earn
         // more than 3% before it goes in.
+        //
+        // It is worse than useless, and the way it hides is worth writing down.
+        // Adding a second session's flights and pooling the two made the same
+        // correction look like a 31% win -- 75.2px down to 51.8px -- which is
+        // exactly the kind of number that gets a change shipped. Split by session
+        // it evaporates:
+        //
+        //   session A (n=8)    54.7px -> 53.0px    -3%
+        //   session B (n=7)    61.4px -> 75.1px   +23%   WORSE
+        //   pooled   (n=15)    75.2px -> 51.8px   -31%
+        //
+        // The tell is that pooling made the CONSTANT model worse than it was in
+        // either session on its own, which can only happen if pooling introduced
+        // variance neither session had. The linear term then soaks that up, and the
+        // leave-one-out score rewards it for absorbing an artefact of pooling
+        // rather than for predicting anything. Per-session the parameters agree to
+        // within .21 of a standard deviation, so there is no real drift to model.
+        // Score a per-shot correction per session, never across pooled sessions.
         //
         // The ~55px of arc height at the rim is therefore the real accuracy ceiling
         // today, and it is per-shot noise in L and R rather than anything to do
