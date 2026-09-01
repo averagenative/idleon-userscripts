@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         IdleOn Helper Suite
 // @namespace    nativerobot
-// @version      1.3
+// @version      1.5
 // @downloadURL https://raw.githubusercontent.com/averagenative/idleon-userscripts/main/idleon-suite.user.js
 // @updateURL   https://raw.githubusercontent.com/averagenative/idleon-userscripts/main/idleon-suite.user.js
 // @description  All-in-one: autoclicker + Hoops, Fishing and Darts minigame helpers for Legends of IdleOn, each one individually switchable
@@ -1381,6 +1381,11 @@
         cfg.aim2 = 0.3095; cfg.aim1 = 0.5631; cfg.aim0 = 0.0420;
         delete cfg.aimA; delete cfg.aimB;
       }
+      // A zero curvature can only have come from the straight-line fallback that
+      // refitAim used to drop to below eight samples — the seed has never been a
+      // line under calVer 6. Put the seed curve back; the samples themselves are
+      // still good, and the first cast landed from here refits them properly.
+      if (!cfg.aim2) { cfg.aim2 = 0.3095; cfg.aim1 = 0.5631; cfg.aim0 = 0.0420; }
   });
 
   const FISHING = {
@@ -1473,7 +1478,17 @@
       // Hazard hue and brightness vary by fishing spot: the first one measured sat
       // at hue 320-340 / v.46-.54, another at hue ~350 / v up to .85. Too narrow a
       // window and the AVOID rings simply never appear.
-      const isHazard = (h, s, v) => h > 315 && h <= 360 && s > 0.28 && v > 0.3;
+      //
+      // The window also has to WRAP, and it never did. Written as 315..360 it
+      // stops dead at the top of the circle, and hsvAt returns hue 0 — not 360 —
+      // for pure red. A colour census of the Blunder Hills lane read off the live
+      // canvas found the urchin's two strongest tones sitting at exactly hue 0:
+      // rgb(240,66,66) s.73 v.94, 96px of outline, and rgb(125,93,93) s.26 v.49,
+      // 96px of body. Both were outside 315..360, so not one of the sprite's 456
+      // pixels could ever match and the AVOID ring never appeared at that spot at
+      // all. inH wraps the same way isBobber's 345..15 does; +5 is enough to cover
+      // hue 0 without letting the window drift towards the sand's orange.
+      const isHazard = (h, s, v) => inH(h, 315, 5) && s > 0.28 && v > 0.3;
       // Higher-tier catches unlocked by landing streaks (eel +2, squid +3, whale +5),
       // measured off the game's legend sprites. The squid's purple sits at 255-315,
       // just clear of the hazard window, which starts at 315. Only the whale's
@@ -1482,8 +1497,25 @@
       // The lane's own shadow edge reaches hue ~225 at s .6-.7, which a window
       // starting at 216 rang as a whale; the whale body is hue ~230 at s ~.4, so
       // both the hue floor and a saturation ceiling keep the shadow out.
+      //
+      // The squid's saturation floor came off that legend icon and was far too high
+      // for the sprite swimming in the lane. Read off the live canvas, the sprite is
+      // three flat tones and only ONE of them cleared s > .22:
+      //
+      //   rgb(237,204,240)  h295 s.150 v.94  138px   body — the bulk of it
+      //   rgb(147,89,161)   h288 s.447 v.63   63px   mid shading
+      //   rgb(49,24,60)     h282 s.600 v.24   77px   outline (below the v floor)
+      //
+      // Keeping only the 63 shading pixels left them scattered as single dots
+      // through the body they outline, so nothing connected: no component reached
+      // even a 21px floor, let alone the 63px the count screen wanted, and the
+      // squid was never ringed once. At s > .12 the sprite comes back as a single
+      // 173px, 22x24 blob. The floor is set .03 below the body's exact .15 rather
+      // than snug against it because that .15 is a palette entry, and a sprite
+      // drawn at another scale blends its edges. A whole-canvas sweep at s > .10
+      // turned up no new component anywhere, so there is room below to spend.
       const isEel   = (h, s, v) => h > 30 && h < 55 && s > 0.35 && v > 0.55;
-      const isSquid = (h, s, v) => h > 255 && h <= 315 && s > 0.22 && v > 0.35;
+      const isSquid = (h, s, v) => h > 255 && h <= 315 && s > 0.12 && v > 0.35;
       const isWhale = (h, s, v) => h > 228 && h < 258 && s > 0.22 && s < 0.6 && v > 0.3;
       const SPECIES = [
         { name: 'FISH',  pts: 1, color: '#4ade80', test: isFish },
@@ -1756,9 +1788,27 @@
       // A parabola needs its samples spread out to be worth fitting: six casts all
       // at half power pin the middle and let the ends fly anywhere, which is a
       // worse predictor than the seed they replaced. So the quadratic is only
-      // accepted with enough samples over a wide enough range of the gauge, and a
-      // straight line is fitted below that — still better than nothing, and it
-      // cannot bend the wrong way.
+      // accepted with enough samples over a wide enough range of the gauge.
+      //
+      // Below that the fit used to drop to a straight line, on the reasoning that a
+      // line is "still better than nothing and cannot bend the wrong way". That was
+      // true when the seed was itself a line, and became wrong the moment v6 made
+      // the seed a curve measured over 19 casts and two spots: the fallback was no
+      // longer replacing nothing, it was replacing the best number in the file. In
+      // practice it fired almost immediately — three casts is enough — and a live
+      // config caught in the act held aim2 = 0, aim1 = .8456 from six samples that
+      // spanned only p .25 to .625. Against the seed that line reads +2.2% of the
+      // lane at half power and -6.9% at full, so the further the target the more
+      // power it demands, and you have to release early to land anything. That is
+      // exactly the complaint v6 was supposed to have fixed.
+      //
+      // So the fallback keeps the curvature and fits only what the samples can
+      // honestly see: the slope and the offset. Both spots measured for v6 fell on
+      // the same curve, which makes SEED_C2 the game's law rather than one lane's
+      // quirk, while slope and offset absorb the things that do move — chiefly how
+      // wide findLane measured this particular lane. Two free parameters need far
+      // fewer samples than three, and the result cannot bend the wrong way either.
+      const SEED_C2 = 0.3095;   // must move with cfg.aim2's default and migration
       function refitAim() {
         const S = cfg.samples;
         if (S.length < 3) return;
@@ -1777,8 +1827,13 @@
           if (sol) [c2, c1, c0] = sol;
         }
         if (!c2) {
+          // Curvature pinned, slope and offset least-squared over l - SEED_C2*p^2.
+          c2 = SEED_C2;
           let n = 0, sx = 0, sy = 0, sxx = 0, sxy = 0;
-          for (const [p, l] of S) { n++; sx += p; sy += l; sxx += p * p; sxy += p * l; }
+          for (const [p, l] of S) {
+            const y = l - c2 * p * p;
+            n++; sx += p; sy += y; sxx += p * p; sxy += p * y;
+          }
           const den = n * sxx - sx * sx;
           if (Math.abs(den) < 1e-6) return;
           c1 = (n * sxy - sx * sy) / den;
@@ -1895,7 +1950,21 @@
         let fish = [], haz = [], landed = null;
         if (S) {
           const toCss = o => ({ x: o.x / S.w * W, y: (S.sy + o.y) / S.cvH * H, w: o.w / S.w * W, h: o.h / S.cvH * H, n: o.n });
-          const sx0 = Math.round(laneX0 / W * S.w), sx1 = Math.round(laneX1 / W * S.w);
+          // Search a little PAST both ends of the lane. A catch drifting to the end
+          // of the water keeps swimming until its centre is level with the last
+          // pixel of the bar, and half its sprite then hangs over the edge — but
+          // the search box used to stop exactly at laneX1, so the blob was sliced
+          // down the middle as it went. Watched live at Blunder Hills, a squid held
+          // 173px and a solid ring out to 96% of the lane, then fell to 84px and
+          // lost the ring at 99% purely to the slicing: the count floor was never
+          // the problem, the width screen was, because three surviving columns are
+          // not 1.2% of the canvas wide. Half a sprite is the margin that fixes it
+          // — that squid measured 22px against a 296px lane, so 5% is half a sprite
+          // with a little room. Nothing downstream gets looser: startX still throws
+          // out the sand mound off the left end, and onLane still throws out the
+          // surfboard rack off the right.
+          const pad = Math.round(laneW * 0.05 / W * S.w);
+          const sx0 = Math.round(laneX0 / W * S.w) - pad, sx1 = Math.round(laneX1 / W * S.w) + pad;
           const px = S.w / W;                                    // native px per CSS px
           // The strip is tall enough that scenery pokes into it: the surfboard
           // rack at the spot's right edge matches both the hazard pink and the
@@ -1937,7 +2006,15 @@
             const p = invAim((f.x - laneX0) / laneW);
             drawLaneMark(f.x, f.y, f.color, `${f.name} +${f.pts}`, p !== null ? ((p * 100) | 0) + '%' : null);
           }
-          for (const z of haz) drawLaneMark(z.x, z.y, '#f87171', 'AVOID');
+          // A hazard with a catch sitting on it is not a hazard. Land there and the
+          // catch is what you get — which is why the aim marker below already lets
+          // the catch colour outrank the hazard colour. Ringing it AVOID as well
+          // put a red ring and a species ring on the same pixel, arguing with each
+          // other over a spot you actually want to hit. Hazards only cost you when
+          // you land on a bare one, or miss everything; same W*0.02 as the marker.
+          for (const z of haz)
+            if (!fish.some(f => Math.abs(f.x - z.x) < W * 0.02))
+              drawLaneMark(z.x, z.y, '#f87171', 'AVOID');
         }
 
         // ---- power meter ----
