@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         IdleOn Hoops Helper
 // @namespace    nativerobot
-// @version      1.8
+// @version      1.9
 // @downloadURL https://raw.githubusercontent.com/averagenative/idleon-userscripts/main/idleon-hoops.user.js
 // @updateURL   https://raw.githubusercontent.com/averagenative/idleon-userscripts/main/idleon-hoops.user.js
 // @description  Dotted-line shot preview + live ball arc for the Swishy Hoops minigame in Legends of IdleOn
@@ -54,29 +54,53 @@
     debug: false,      // outline every detected blob
     // Calibration is stored as fractions of canvas size so it survives resizing
     // the window — the game scales its physics with the viewport.
-    calVer: 5,         // bump to throw away calibration learned by an older build
+    calVer: 6,         // bump to throw away calibration learned by an older build
     // The shot is a fixed parabola anchored to the PLATFORM, not to the ball in
     // your hands. Written as y = platY + A*(u - uL)*(u - R) where u is distance
     // right of the platform centre: A is curvature, uL and R are where the path
-    // crosses platform height going up and coming down.
-    // Measured across three recordings and five shots; leave-one-out prediction
-    // of the landing point is within 48px. Anchoring to the held ball instead
-    // was ~100px out, because that anchor goes stale while the character jumps
-    // and the platform keeps moving under them.
-    shotA: 2.103,      // curvature x canvas width
-    shotL: -0.179,     // upward crossing, fraction of width left of the platform
-    shotR: 0.557,      // landing range, fraction of width right of the platform
+    // crosses platform height going up and coming down. Anchoring to the held
+    // ball instead was ~100px out, because that anchor goes stale while the
+    // character jumps and the platform keeps moving under them.
+    //
+    // "Fixed" is now measured rather than assumed. The README used to record an
+    // open question -- per-shot arc ranging 1.71-3.01, "either the shot
+    // genuinely varies or the single-shot fit is noisy". It is the fit. Fitting
+    // x(t) and y(t) separately across 15 live flights (which needs no release
+    // instant, and cannot degenerate the way y-as-a-function-of-x does) gives a
+    // release velocity of 536-541 px/s horizontally across every well-tracked
+    // flight -- the same shot to half a percent. Nothing about it varies.
+    //
+    // These three are the medians of 8 flights that passed the span and bounce
+    // screens, read live off the running game rather than off a recording:
+    //
+    //   shotA  2.233  sd .034  range 2.195..2.288   old seed 2.103, 6% low
+    //   shotL -0.119  sd .030  range -.158..-.083   old seed -0.179, 33% off
+    //   shotR  0.547  sd .031  range  .510.. .588   old seed 0.557, agrees
+    //
+    // shotR is the one the old five-shot seed already had right, and it is also
+    // the one the tracked points actually cover. shotL is the weakest of the
+    // three in both seeds: it is where the arc crossed platform height on the
+    // way UP, which is behind the point tracking starts, so no shot ever
+    // observes it directly and every estimate of it is an extrapolation. Its
+    // own spread across shots is a quarter of its value. Treat a disagreement
+    // there as unsettled rather than as this seed being right.
+    shotA: 2.233,      // curvature x canvas width
+    shotL: -0.119,     // upward crossing, fraction of width left of the platform
+    shotR: 0.547,      // landing range, fraction of width right of the platform
     calSeeded: true,
     collapsed: false,  // rolled up to just the title bar
     hidden: false,
     px: null, py: null // dragged panel position, viewport px
   }, JSON.parse(localStorage.getItem(KEY) || '{}'));
-  // Calibration from an older build was learned per frame rather than per shot,
-  // so whatever is stored is one arbitrary mid-flight fit — wrong rather than
-  // merely stale. Drop it outright.
-  if (cfg.calVer !== 5) {
-    cfg.calVer = 5; cfg.calSeeded = true;
-    cfg.shotA = 2.103; cfg.shotL = -0.179; cfg.shotR = 0.557;
+  // Calibration learned before calVer 6 banked a fit from every frame of every
+  // flight that produced a plausible-looking parabola, including flights barely
+  // tracked at all and flights that came off the backboard. Measured over 15
+  // live flights the committed curvature ranged 1.865-2.941 around a true
+  // 2.23 — a live config caught mid-session held 2.486. That is not stale, it
+  // is contaminated, and averaging more shots into it does not wash it out.
+  if (cfg.calVer !== 6) {
+    cfg.calVer = 6; cfg.calSeeded = true;
+    cfg.shotA = 2.233; cfg.shotL = -0.119; cfg.shotR = 0.547;
   }
   delete cfg.grav; delete cfg.launch; delete cfg.launchN; delete cfg.gravN;
   const save = () => localStorage.setItem(KEY, JSON.stringify(cfg));
@@ -806,6 +830,19 @@
         const dir = Math.sign(pN.x - p0.x) || 1;
         made = drawCurve(x => f.a * x * x + f.b * x + f.c, fly.x, dir, W, H, 'live');
 
+        // Has this shot come off the backboard or the far lip of the rim? Both
+        // are ordinary ways to score, and both send the ball back over x it has
+        // already crossed. A projectile's x is monotonic, so any retreat from
+        // the furthest point reached is a bounce and nothing else. The margin
+        // is a whole 1% of the width because the tracker's own x jitter measured
+        // 3-7px rms, and one noisy frame must not read as a bounce.
+        if (!fly.dir0 && Math.abs(pN.x - p0.x) > 4) fly.dir0 = Math.sign(pN.x - p0.x);
+        if (fly.dir0) {
+          const reach = pN.x * fly.dir0;
+          if (fly.reach === undefined || reach > fly.reach) fly.reach = reach;
+          else if (fly.reach - reach > W * 0.01) fly.bounced = true;
+        }
+
         // Learn the shot in platform-relative terms: curvature, plus where the
         // path crosses platform height going up and coming down. Those three
         // are the same for every shot regardless of when tracking began.
@@ -817,11 +854,45 @@
             const uL = (Math.min(r1, r2) - flightPlat.x) * dir;
             const uR = (Math.max(r1, r2) - flightPlat.x) * dir;
             const An = A * W, Ln = uL / W, Rn = uR / W;
-            // Measured spread across recordings: A*W 2.05-2.18, R/W .54-.59.
-            // Anything outside this is a corrupted fit, not a different shot.
-            // Banked, not applied: the shot is only folded in once it is over
-            // and the whole flight can be reduced to one median fit.
-            if (An > 1.5 && An < 3.2 && Rn > 0.40 && Rn < 0.75 && Ln > -0.45 && Ln < 0.05)
+            const xs = fly.pts.map(q => q.x);
+            const span = Math.max(...xs) - Math.min(...xs);
+            // Two screens on top of the plausibility window, both measured off
+            // 15 live flights read out of the running game over the DevTools
+            // protocol. The window alone is not enough: it asks whether the
+            // fitted parabola looks sane, never whether the points under it
+            // were a single projectile, and the worst offenders sail through.
+            //
+            // SPAN. fitXY needs only 40px of x to return a curve, and it will,
+            // but curvature error goes as 1/spread^2, so a fit over a short arc
+            // is a guess wearing a number. The three wildest calibrations in
+            // the sample -- A of 2.941, 1.865, 2.716 against a true 2.23 -- came
+            // from the three shortest tracks, spans of 200, 143 and 140px. 40px
+            // stays as fitXY's floor because the live arc should still draw
+            // early in a flight; it is only LEARNING that waits for real spread.
+            //
+            // BOUNCE. y is fitted as a function of x, so a ball returning over
+            // its own x is not a hard fit, it is an impossible one -- two y for
+            // one x. That is where A reached 55.
+            //
+            // Sweeping the span gate over those flights (commits kept, spread
+            // of the committed A):
+            //
+            //   none (shipped)  15 commits  47.4%   1.865-2.941
+            //   0.10 W          11 commits  19.3%
+            //   0.15 W          10 commits   8.2%      + bounce cut  4.3%
+            //   0.20 W          10 commits   7.7%      + bounce cut  4.2%
+            //   0.25 W          10 commits   7.2%      + bounce cut  4.0%
+            //   0.30 W          10 commits   5.1%
+            //   0.35 W           7 commits   2.0%
+            //   0.40 W           2 commits   0.9%
+            //
+            // Commits hold flat from .15 to .30 and fall off a cliff above it,
+            // so .20 sits in the middle of the plateau rather than on an edge:
+            // tightening or loosening it by a quarter changes nothing much.
+            // Together they take the spread from 47.4% to 4.2% for two commits
+            // out of ten -- and a commit is cheap, the calibration averages.
+            if (!fly.bounced && span >= W * 0.20 &&
+                An > 1.5 && An < 3.2 && Rn > 0.40 && Rn < 0.75 && Ln > -0.45 && Ln < 0.05)
               calSamples.push({ A: An, L: Ln, R: Rn });
           }
         }
@@ -892,7 +963,7 @@
 
   const toggle = () => { cfg.on = !cfg.on; if (!cfg.on) tracks = []; save(); sync(); };
   tap(runBtn, toggle);
-  tap($('#cal'), () => { cfg.shotA = 2.103; cfg.shotL = -0.179; cfg.shotR = 0.557; cfg.calSeeded = true; calSamples = []; save(); });
+  tap($('#cal'), () => { cfg.shotA = 2.233; cfg.shotL = -0.119; cfg.shotR = 0.547; cfg.calSeeded = true; calSamples = []; save(); });
   $('#span').onchange  = e => { cfg.span = Math.max(200, +e.target.value); save(); };
   $('#hue').onchange   = e => { cfg.hue = (+e.target.value % 360 + 360) % 360; save(); };
   $('#huew').onchange  = e => { cfg.hueW = Math.min(90, Math.max(1, +e.target.value)); save(); };
