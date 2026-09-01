@@ -128,13 +128,39 @@ The arc starts noticeably **above your head** — that's correct, not a bug. The
 
 ### Calibration
 
-The shot is described by three numbers, all fractions of canvas size: the curvature of the arc, and where it crosses platform height going up and coming down. They are seeded from five measured shots, so the arc draws immediately — the status shows `(default)` until your own first shot replaces them outright (not blended, since the default isn't your game). Later shots refine by averaging, and fits outside the measured spread are rejected rather than averaged in.
+The shot is described by three numbers, all fractions of canvas size: the curvature of the arc, and where it crosses platform height going up and coming down. They are seeded from measured shots, so the arc draws immediately — the status shows `(default)` until your own first shot replaces them outright (not blended, since the default isn't your game). Later shots refine by averaging, and fits outside the measured spread are rejected rather than averaged in.
 
 Each shot contributes **once**, from the median of the fits taken across its whole flight, committed when the ball is gone. An earlier build folded in every frame of every flight; at a 0.25 weight applied thirty-odd times in a row that is not an average, so each shot ended up sitting on its own last fit no matter what came before it.
 
-That made it possible to read the **per-shot spread** off a recording taken while resetting between shots: `arc` ranged 1.71–3.01 and `range` 48–63%. That is a ±30% swing on curvature from shots taken the same way, which is far wider than the ±3% the seeded defaults were measured at. Either the shot genuinely varies or the single-shot fit is noisy; until that is settled, treat the preview as an aim guide rather than a guarantee. Averaging across shots is what the current weighting is for — **resetting between shots defeats it**.
+That made it possible to read the **per-shot spread** off a recording, and it was alarming: `arc` ranged 1.71–3.01, a ±30% swing on curvature from shots taken the same way. It was an open question whether the shot genuinely varied or the single-shot fit was noisy.
+
+It is the fit. Reading 15 flights out of the running game over the DevTools protocol and fitting `x(t)` and `y(t)` separately — which needs no release instant, and cannot degenerate the way fitting `y` as a function of `x` does — gives a horizontal release speed of **536–541 px/s across every well-tracked flight**. The shot is the same shot to half a percent, every time. Nothing about it varies.
+
+The spread was two things, and neither is the shot:
+
+- **Short tracks.** `fitXY` returns a curve from only 40px of horizontal spread, and curvature error goes as 1/spread², so a fit over a short arc is a guess wearing a number. The three wildest calibrations in the sample — 2.941, 1.865, 2.716 against a true 2.23 — were the three shortest tracks, spans of 200, 143 and 140px.
+- **Backboard and rim-lip bounces**, both of which are ordinary ways to score. They send the ball back over `x` it has already crossed, and since the curve is fitted as `y` of `x`, that is not a hard fit but an impossible one — two `y` for one `x`. This is where `arc` reached 55.
+
+Learning now waits for a track spanning 20% of the canvas and stops at the first bounce, which takes the spread of the committed curvature from **47% to 4%**. The 40px floor stays inside `fitXY` so the live arc still draws early in a flight; it is only *learning* that waits. Averaging across shots is what the weighting is for — **resetting between shots defeats it**.
 
 Predicting each measured shot from only the *other* shots (leave-one-out) lands within 48px, mean error 3px.
+
+**The anchor is the biggest error left, and it is not yet understood.** `arc`, `range` and the upward crossing are meant to describe *the shot*, so anchoring them to the platform should make them invariant to where the platform is. Measured across two independent runs read off the live game, they are not:
+
+| | corr(platY, upward crossing) | corr(platY, range) |
+|---|---|---|
+| 8 flights | −0.79 | +0.71 |
+| 5 flights | −0.86 | +0.77 |
+
+Curvature barely moves, which is the tell — it is set by `g / 2·vx²`, and neither of those cares how high the platform is, while the other two are where the arc meets platform *height*.
+
+It looks like the lever, and it is not. Modelling the upward crossing as linear in platform height predicts it 43% better out of sample (leave-one-out mean error 51.6px → 29.6px), and `range` barely moves. But the number that decides a make is the height of the arc where it passes the **rim**, and there the same comparison is 54.7px → 53.0px: three percent. The errors in the three parameters are correlated and largely cancel by the time the curve reaches the rim. Measured and left unshipped on that basis — an unexplained empirical correction fitted on 11 flights from one player has to earn more than 3%.
+
+So the ~55px of arc height at the rim is the real accuracy ceiling today, and it is per-shot noise in the two crossings rather than anything to do with the anchor. Averaging across shots is what removes it, which is what the commit weighting is for. Three explanations have been measured and none survived — a stale anchor (a Δt sweep over −200…+400ms shows no minimum), the detector picking a different row as the platform moves (width was 177px in 2565 of 2566 frames), and the ball inheriting the platform's velocity (correlates worse than height, though the two are confounded on an oscillating platform). What remains is that the shot may not be fixed relative to the platform at all. Settling it needs the release instant, which nothing currently measures.
+
+Two further things are known but *not* the problem. The anchor's `y` snaps to a 5.5px grid, because `findPlatform` runs on the downscaled readback — that contributes about 4% of the observed spread, so it is not worth chasing. And the platform has never once been observed to move horizontally, so the horizontal half of the anchor is entirely untested; it first matters when the platform starts looping later in a run.
+
+Of the three numbers, `range` is the trustworthy one — it is the part of the arc the tracked points actually cover, and two independently measured seeds agree on it to 2%. The upward crossing is the weakest in any seed: it sits behind the point tracking begins, so no shot ever observes it directly and every estimate of it is an extrapolation. Its spread across shots is a quarter of its own value.
 
 Calibration is stored in `localStorage` (`hoops_cfg`) relative to canvas size, so it survives resizing the window. **Reset calibration** returns to the measured default. Calibration learned by an older build is discarded automatically via a version stamp — early builds tracked the wrong sprites and learned wrong numbers, and a wrong throw is worse than none.
 
