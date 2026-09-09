@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         IdleOn Darts Helper
 // @namespace    nativerobot
-// @version      1.4
+// @version      1.5
 // @downloadURL https://raw.githubusercontent.com/averagenative/idleon-userscripts/main/idleon-darts.user.js
 // @updateURL   https://raw.githubusercontent.com/averagenative/idleon-userscripts/main/idleon-darts.user.js
 // @description  Draws the predicted dart path and where it lands on the board, wind included, for the Throwy Darts minigame
@@ -503,7 +503,29 @@
     const trust = wnd.key === 'cyan' ? 1 : 0;
     const A = trust * cfg.windK * (wnd.mph || 6) * W;
     const wr = (wnd.deg || 0) * Math.PI / 180;
-    const ax = A * Math.cos(wr), ay = -A * Math.sin(wr);
+    // The wind is ONE vector, but the game does not push equally hard along
+    // both axes with it. Read out of N.js, the shipped bundle: the minigame
+    // builds the wind as 30*cos(phi) and 30*sin(phi) into two slots, then each
+    // flight tick adds the horizontal slot over 600 and the vertical slot over
+    // 750. Same vector, different divisors — so the horizontal acceleration is
+    // 750/600 = 1.25x the vertical one, and a model using a single coefficient
+    // for both is wrong on the horizontal axis by exactly that factor.
+    //
+    // Which axis is the correct one is settled by how windK was measured: it
+    // was solved from the vertical acceleration difference between two wind
+    // clusters (see its comment), so 0.0158 is the /750 term and it stays. The
+    // horizontal is the one that was never independently confirmed — the
+    // per-throw x-fits scattered +-300px/s^2 — and it is the one that moves.
+    //
+    // This should also account for the residual recorded against landN: "the
+    // unexplained leftover splits +-20px WITH the wind sign". A horizontal
+    // wind error does exactly that. It changes how long the dart takes to
+    // reach the board, so it lands at the wrong point on an otherwise correct
+    // vertical curve, and the error flips sign when the wind does. landN was
+    // fitted with the horizontal term 20% light and is therefore carrying some
+    // of it; it wants re-measuring on throws recorded after this change.
+    const HV = 1.25;
+    const ax = A * HV * Math.cos(wr), ay = -A * Math.sin(wr);
     const th = deg * Math.PI / 180;
     const vx = v * Math.cos(th), vy = -v * Math.sin(th);
     // The residual is eased in over the flight so the line still starts at the
