@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         IdleOn Fishing Helper
 // @namespace    nativerobot
-// @version      2.3
+// @version      2.4
 // @downloadURL https://raw.githubusercontent.com/averagenative/idleon-userscripts/main/idleon-fishing.user.js
 // @updateURL   https://raw.githubusercontent.com/averagenative/idleon-userscripts/main/idleon-fishing.user.js
 // @description  Draws where your cast will land, plus fish and hazard markers, for the IdleOn fishing minigame
@@ -64,9 +64,13 @@
   }, JSON.parse(localStorage.getItem(KEY) || '{}'));
   // Samples are (power, landing) pairs and would survive a change of model —
   // but not a change of what "power" meant. Everything learned before v6 was
-  // paired with a gauge reading that could collapse, so it goes.
-  if (cfg.calVer !== 6) {
-    cfg.calVer = 6; cfg.samples = [];
+  // paired with a gauge reading that could collapse. Everything learned before
+  // v7 was paired with a gauge read through the 4x downscale, where one row of
+  // the ~21-row gauge was ~5% of it and the reading could not resolve the
+  // game's own step at all — so those pairs carry the readback error in the
+  // power axis, and refitting on them fits the error. They go too.
+  if (cfg.calVer !== 7) {
+    cfg.calVer = 7; cfg.samples = [];
     cfg.aim2 = 0.3095; cfg.aim1 = 0.5631; cfg.aim0 = 0.0420;
     delete cfg.aimA; delete cfg.aimB;
   }
@@ -195,6 +199,33 @@
       stctx.clearRect(0, 0, cv.width, hh);
       stctx.drawImage(cv, 0, sy, cv.width, hh, 0, 0, cv.width, hh);
       return { d: stctx.getImageData(0, 0, cv.width, hh).data, w: cv.width, h: hh, sy, cvH: cv.height };
+    } catch (e) { return null; }
+  }
+
+  // The gauge is read at NATIVE resolution, in its own narrow grab. Everything
+  // else works off the 4x-downscaled frame, which is fine for finding a lane
+  // 20% of the screen wide and hopeless for a gauge ~64px tall: see the power
+  // meter section for what that cost. The band is ~10% of the width by 30% of
+  // the height, so this reads about a fortieth of the frame — cheaper than the
+  // downscaled grab it corrects, and it only runs once a lane has been found.
+  const gauge = document.createElement('canvas');
+  const gctx = gauge.getContext('2d', { willReadFrequently: true });
+
+  function grabGauge(cv, lane, sw, sh) {
+    // lane is in downscaled coordinates; nx/ny carry back to native ones.
+    const nx = cv.width / sw, ny = cv.height / sh;
+    const sx = Math.max(0, Math.floor((lane.x0 - sw * 0.10) * nx));
+    const ex = Math.min(cv.width, Math.ceil((lane.x0 - sw * 0.005) * nx));
+    const sy = Math.max(0, Math.floor((lane.y - sh * 0.22) * ny));
+    const ey = Math.min(cv.height, Math.ceil((lane.y + sh * 0.08) * ny));
+    const w = ex - sx, h = ey - sy;
+    if (w < 4 || h < 16) return null;
+    if (gauge.width !== w || gauge.height !== h) { gauge.width = w; gauge.height = h; }
+    try {
+      gctx.clearRect(0, 0, w, h);
+      gctx.drawImage(cv, sx, sy, w, h, 0, 0, w, h);
+      return { d: gctx.getImageData(0, 0, w, h).data, w, h, sx, sy, nx, ny,
+               cvW: cv.width, cvH: cv.height };
     } catch (e) { return null; }
   }
 
@@ -382,14 +413,33 @@
   // ---------- the power meter ----------
   // A short vertical gauge just left of the lane that fills from the bottom as
   // you hold. Its fill fraction is what the aim marker is derived from.
-  function readMeter(d, w, h, lane) {
-    const x0 = Math.max(0, lane.x0 - Math.round(w * 0.10));
-    const x1 = Math.max(1, lane.x0 - Math.round(w * 0.005));
-    // The pole keeps going below the lane row, down to its base — the fill's
-    // zero point. Cutting the scan at the lane line (as this used to) read the
-    // gauge about a fifth short: the ruler's 0 floated above the pole's bottom
-    // and every fill in the below-lane stretch measured as zero power.
-    const yLo = Math.max(0, lane.y - Math.round(h * 0.22)), yHi = Math.min(h, lane.y + Math.round(h * 0.08));
+  //
+  // The gauge is read at NATIVE resolution, out of its own grab, while the lane
+  // and everything else come off the 4x-downscaled frame. That split is the
+  // whole point of this section, so it is worth writing down why.
+  //
+  // The game sets the fill sprite's vertical scale to round(64 * power) — read
+  // out of N.js, the shipped bundle, where _event_Minigames1 does
+  //
+  //     theta += 1                          (starts at 90, one step per tick)
+  //     power  = 1 - |sin(theta degrees)|
+  //     AdjustImgInst("height", fillSprite, 100 * round(64 * power))
+  //
+  // and AdjustImgInst("height", img, e) is set_scaleY(SCALE * e / 100). So the
+  // fill takes exactly 65 heights and one step is the game's SCALE in pixels.
+  //
+  // Read through the 4x downscale the whole gauge came to ~21 rows, so a step
+  // was under a third of a row: the reading could not resolve the game's own
+  // quantum, and a one-row error in either the fill or the track was ~5% of the
+  // gauge. The aim curve's slope near full charge is ~1.18 lane-fractions per
+  // unit of power, so that single row arrived as ~6% of the lane — four times
+  // the error of the curve it was feeding. That is why long casts were far off
+  // while short ones looked fine: the same row is worth ~6% at full charge and
+  // very little near zero, because the charge law is flattest at the bottom.
+  const RUNGS = 64;
+
+  function readMeter(G, lane) {
+    const { d, w, h, sx, sy, nx, ny, cvW, cvH } = G;
     const isCase = (hu, s, v) => v < 0.55 && inH(hu, 5, 60) && s > 0.25;
     const part = (hu, s, v) => isBobber(hu, s, v) || isCase(hu, s, v);
 
@@ -397,31 +447,44 @@
     // ~43% on every reading, because the striped beach umbrella beside the
     // meter is red too — so low-power casts could never be predicted. The
     // gauge is a tall thin column and the umbrella is squat, so the column
-    // with the longest unbroken vertical run picks out the real meter.
+    // with the longest vertical run picks out the real meter.
+    //
+    // The run BRIDGES small gaps, as findLane does. It did not have to when
+    // this ran on the downscaled frame: the 4x box filter blurred the pole's
+    // own texture, the fill/track seam and the green marker line into pixels
+    // that passed, so an unbroken run was easy to come by. At native
+    // resolution those gaps are real, and a strict run measured 16-32 rows
+    // against the 38 this test demands — every frame above about a third
+    // charge failed outright and the meter read nothing at all. Bridging is
+    // also what keeps the test meaningful rather than merely looser: what
+    // separates the gauge from the umbrella is that the gauge is LONG, and a
+    // run broken into thirds cannot show that.
+    const bridge = Math.max(2, Math.round(cvH * 0.006));
     let bestX = -1, bestRun = 0;
-    for (let x = x0; x < x1; x++) {
-      let run = 0;
-      for (let y = yLo; y < yHi; y++) {
+    for (let x = 0; x < w; x++) {
+      let run = 0, gap = 0, longest = 0;
+      for (let y = 0; y < h; y++) {
         const [hu, s, v] = hsvAt(d, y * w + x);
-        if (part(hu, s, v)) { run++; if (run > bestRun) { bestRun = run; bestX = x; } }
-        else run = 0;
+        if (part(hu, s, v)) { run += gap + 1; gap = 0; if (run > longest) longest = run; }
+        else if (run && gap < bridge) gap++;
+        else { run = 0; gap = 0; }
       }
+      if (longest > bestRun) { bestRun = longest; bestX = x; }
     }
-    if (bestX < 0 || bestRun < h * 0.05) return null;
+    if (bestX < 0 || bestRun < cvH * 0.05) return null;
 
-    const pad = Math.max(1, Math.round(w * 0.006));
-    const cx0 = Math.max(x0, bestX - pad), cx1 = Math.min(x1, bestX + pad + 1);
+    const pad = Math.max(1, Math.round(cvW * 0.006));
+    const cx0 = Math.max(0, bestX - pad), cx1 = Math.min(w, bestX + pad + 1);
     // Per row: how many of the band's columns are pole, and how many are fill.
-    const n = yHi - yLo;
-    const rowN = new Uint8Array(n), rowRed = new Uint8Array(n);
-    for (let y = yLo; y < yHi; y++) {
+    const rowN = new Uint8Array(h), rowRed = new Uint8Array(h);
+    for (let y = 0; y < h; y++) {
       let c = 0, r = 0;
       for (let x = cx0; x < cx1; x++) {
         const [hu, s, v] = hsvAt(d, y * w + x);
         if (isBobber(hu, s, v)) { r++; c++; }
         else if (isCase(hu, s, v)) c++;
       }
-      rowN[y - yLo] = c; rowRed[y - yLo] = r;
+      rowN[y] = c; rowRed[y] = r;
     }
     // One matching pixel in the row is enough. There WAS a width test here —
     // "at least half as many columns as the widest row" — to keep single-pixel
@@ -442,7 +505,7 @@
     // What actually separates a gauge from a speck is not width, it is that a
     // gauge is a long unbroken run and a speck is one or two isolated rows.
     // The walk below tests exactly that, and it was already doing the work.
-    const on = i => i >= 0 && i < n && rowN[i] > 0;
+    const on = i => i >= 0 && i < h && rowN[i] > 0;
 
     // Both ends are walked out from inside the pole rather than taken as the
     // first and last matching row. Two things break the run and have to be
@@ -450,15 +513,15 @@
     // that matches neither mask, and the game draws a green marker line across
     // the gauge. The gap to the foliage above is far longer than either, so
     // bridging a couple of rows separates them cleanly.
-    const gapMax = Math.max(2, Math.round(h * 0.02));
+    const gapMax = Math.max(2, Math.round(cvH * 0.02));
     const walk = (from, dir) => {
       let cur = from;
       for (;;) {
         let next = -1;
         for (let g = 1; g <= gapMax; g++) {
           const y = cur + dir * g;
-          if (y < yLo || y >= yHi) break;
-          if (on(y - yLo)) { next = y; break; }
+          if (y < 0 || y >= h) break;
+          if (on(y)) { next = y; break; }
         }
         if (next < 0) return cur;
         cur = next;
@@ -466,39 +529,104 @@
     };
     // The base is sought from the lane row down, not up: the dark PTS banner
     // sits lower in the same columns at some layouts.
-    let bot = Math.min(lane.y, yHi - 1);
-    while (bot > yLo && !on(bot - yLo)) bot--;
-    if (!on(bot - yLo)) return null;
+    let bot = Math.min(Math.round(lane.y * ny) - sy, h - 1);
+    if (bot < 0) return null;
+    while (bot > 0 && !on(bot)) bot--;
+    if (!on(bot)) return null;
     bot = walk(bot, 1);
     const top = walk(bot, -1);
-    if (bot - top < 4) return null;
+    // Four rows of the OLD downscaled gauge, which is 4*ny native rows now.
+    if (bot - top < 4 * ny) return null;
     let fillTop = null;
-    for (let y = top; y <= bot; y++) if (rowRed[y - yLo] > 0) { fillTop = y; break; }
-    const total = bot - top + 1;
-    const fill = fillTop === null ? 0 : (bot - fillTop + 1);
-    return { top, bot, total, x: bestX, fillTop, frac: Math.max(0, Math.min(1, fill / total)) };
+    for (let y = top; y <= bot; y++) if (rowRed[y] > 0) { fillTop = y; break; }
+    // Ends come back in native canvas pixels, which is the space the geometry
+    // is held in — the band offset sy moves with the lane row and must not
+    // leak into a value that is supposed to be fixed furniture.
+    return {
+      x: (sx + bestX) / nx,
+      topAbs: sy + top, botAbs: sy + bot,
+      fillTopAbs: fillTop === null ? null : sy + fillTop,
+      nx, ny
+    };
   }
 
-  // The gauge is fixed furniture — it cannot move between frames — so its ends
-  // are held over a short window and the median taken, exactly as the lane is.
-  // A splash or a floating "+1 FISH" can cover part of the pole for a frame or
-  // two, and a gauge measured short reads the same red bar as far more power
-  // than it is. Holding the geometry and re-deriving only the fill removed
-  // every such outlier from the recording (worst case 6 rows for a 21-row
-  // gauge, i.e. triple the true power, on 1% of frames).
-  let meterHist = [];
+  // The gauge is fixed furniture — it cannot move between frames, and the game
+  // never resizes it — so its two ends are settled ONCE and then held, instead
+  // of being re-derived every frame. A splash or a floating "+1 FISH" can cover
+  // part of the pole for a frame or two, and a gauge measured short reads the
+  // same red bar as far more power than it is. The previous version took a
+  // rolling median over 1500ms, which removed the outliers (worst case 6 rows
+  // for a 21-row gauge, i.e. triple the true power, on 1% of frames) but still
+  // let the denominator drift with whatever the last 1.5s happened to contain.
+  // A denominator that drifts is not noise, it is a slow scale error on every
+  // prediction, and the aim marker cannot tell the two apart.
+  let meterHist = [], meterGeom = null;
+  function resetMeter() { meterHist = []; meterGeom = null; }
+
   function stableMeter(m, t) {
-    if (m) meterHist.push({ t, top: m.top, bot: m.bot });
-    meterHist = meterHist.filter(o => t - o.t < 1500);
-    if (!m || meterHist.length < 3) return m;
-    const tops = meterHist.map(o => o.top).sort((a, b) => a - b);
-    const bots = meterHist.map(o => o.bot).sort((a, b) => a - b);
-    const top = tops[tops.length >> 1], bot = bots[bots.length >> 1];
-    if (bot - top < 4) return m;
-    const total = bot - top + 1;
-    const fill = m.fillTop === null ? 0 : (bot - m.fillTop + 1);
-    return { top, bot, total, x: m.x, fillTop: m.fillTop,
-             frac: Math.max(0, Math.min(1, fill / total)) };
+    if (!m) return null;
+    if (!meterGeom) {
+      meterHist.push({ t, top: m.topAbs, bot: m.botAbs });
+      meterHist = meterHist.filter(o => t - o.t < 1500);
+      if (meterHist.length >= 10) {
+        const med = k => {
+          const a = meterHist.map(o => o[k]).sort((x, y) => x - y);
+          return a[a.length >> 1];
+        };
+        meterGeom = { top: med('top'), bot: med('bot') };
+      }
+    }
+    const top = meterGeom ? meterGeom.top : m.topAbs;
+    const bot = meterGeom ? meterGeom.bot : m.botAbs;
+    const totalPx = bot - top + 1;
+    if (totalPx < 4) return null;
+    const fillPx = m.fillTopAbs === null ? 0 : Math.max(0, bot - m.fillTopAbs + 1);
+    const rawFrac = Math.max(0, Math.min(1, fillPx / totalPx));
+    // The game's power is always exactly k/64, so snapping the reading to that
+    // ladder ought to remove the sub-step noise for free. It is computed, and
+    // reported, but deliberately NOT what the helper uses. That reads backwards
+    // until you know where the rungs land in pixels, so:
+    //
+    // The ladder is real. The minigame attaches the gauge's two sprites from
+    // one anchor: the track at anchor.y-87, the fill at anchor.y-23 with its
+    // origin moved to its own bottom edge so it grows upward. 87-23 = 64, the
+    // same 64 the fill's scale is quantised to — a full fill reaches exactly
+    // the track's top edge, one rung is exactly one game unit, and fill/track
+    // really is the power.
+    //
+    // And on the live canvas the rung is exactly one PIXEL. Watched through
+    // tools/chrome over a session of real casts, totalPx reads 64 and never
+    // anything else, because the backing store is the game's own resolution —
+    // so fillPx/64 IS k/64 by construction. Fifteen distinct locked charges
+    // came back 0.063, 0.094, 0.141, 0.156 ... 0.813, every one of them a whole
+    // rung, the largest departure being the 0.05% that three decimal places of
+    // printout can account for on its own. rawFrac needs no snapping: it is
+    // already exact.
+    //
+    // Which also explains the recordings, where 585 readings sat no closer to
+    // the rungs than random, at 32, 64 or 128 alike. Those captured the canvas
+    // at its CSS size, 750 tall against the game's 540, so a unit spanned
+    // 750/540 = 1.389px and the gauge measured the ~89px we saw. A rung that
+    // is 1.4px wide, through H.264, against a fill edge the colour masks
+    // resolve to about half a pixel, is a rung that does not survive being
+    // measured. The ladder was there; the capture destroyed it.
+    //
+    // So the snap stays off, and the two measurements say why better than
+    // either does alone: it is an identity at 64px, exactly where it would be
+    // safe, and unreliable at 89px, exactly where it would have to earn its
+    // place. There is no canvas size at which it is worth having. `snapped`
+    // stays in the probe as the check — if it ever diverges from rawFrac on a
+    // live canvas, the gauge is being read at a scale nobody has thought about.
+    const snapped = Math.round(rawFrac * RUNGS) / RUNGS;
+    const frac = rawFrac;
+    return {
+      x: m.x,
+      top: top / m.ny, bot: bot / m.ny,
+      fillTop: m.fillTopAbs === null ? null : m.fillTopAbs / m.ny,
+      total: totalPx / m.ny,
+      totalPx, fillPx, stepPx: totalPx / RUNGS, rawFrac, frac, snapped,
+      settled: !!meterGeom
+    };
   }
 
   // ---------- blobs of a given colour on/near the lane ----------
@@ -692,7 +820,7 @@
     const L = (t - laneT > 700) ? (laneHist = [], null) : stableLane(raw, t, sh);
     lane = L;
     if (!lane) {
-      bobHist = []; hold = null; meterHist = [];
+      bobHist = []; hold = null; resetMeter();
       if (frame % 15 === 0) stEl.textContent = 'idle\nnot at the fishing spot';
       probe({ frame, idle: 'no lane' });
       return;
@@ -804,7 +932,10 @@
     }
 
     // ---- power meter ----
-    const m = stableMeter(readMeter(d, sw, sh, lane), t);
+    // Its own native-resolution grab, not the downscaled frame — see the
+    // power meter section for the ~6%-of-lane error that cost.
+    const Gg = grabGauge(cv, lane, sw, sh);
+    const m = stableMeter(Gg ? readMeter(Gg, lane) : null, t);
     if (m) {
       charge = m.frac;
       if (charge > 0.02) chargeSeen = t;
