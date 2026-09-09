@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         IdleOn Helper Suite
 // @namespace    nativerobot
-// @version      1.17
+// @version      1.18
 // @downloadURL https://raw.githubusercontent.com/averagenative/idleon-userscripts/main/idleon-suite.user.js
 // @updateURL   https://raw.githubusercontent.com/averagenative/idleon-userscripts/main/idleon-suite.user.js
 // @description  All-in-one: autoclicker + Hoops, Fishing and Darts minigame helpers for Legends of IdleOn, each one individually switchable
@@ -1986,32 +1986,39 @@
         const rawFrac = Math.max(0, Math.min(1, fillPx / totalPx));
         // The game's power is always exactly k/64, so snapping the reading to that
         // ladder ought to remove the sub-step noise for free. It is computed, and
-        // reported, but deliberately NOT what the helper uses.
+        // reported, but deliberately NOT what the helper uses. That reads backwards
+        // until you know where the rungs land in pixels, so:
         //
-        // The ladder is real and its position is not in doubt. The minigame
-        // attaches the gauge's two sprites from one anchor: the track at
-        // anchor.y-87, the fill at anchor.y-23 with its origin moved to its own
-        // bottom edge so it grows upward. 87-23 = 64, the same 64 the fill's scale
-        // is quantised to — so a full fill reaches exactly the track's top edge,
-        // one rung is exactly one game unit, and fill/track really is the power.
+        // The ladder is real. The minigame attaches the gauge's two sprites from
+        // one anchor: the track at anchor.y-87, the fill at anchor.y-23 with its
+        // origin moved to its own bottom edge so it grows upward. 87-23 = 64, the
+        // same 64 the fill's scale is quantised to — a full fill reaches exactly
+        // the track's top edge, one rung is exactly one game unit, and fill/track
+        // really is the power.
         //
-        // What is in doubt is whether the rung survives being measured. At the
-        // canvas size in the recordings the whole track is ~89px, so a rung is
-        // ~1.4px, and the edge of a fill is an antialiased blend the colour masks
-        // resolve to no better than about half a pixel. Half a pixel is a third of
-        // a rung. Snapping under that much noise misassigns the rung often enough
-        // to give back most of what it wins, and it can only ever win half a rung.
+        // And on the live canvas the rung is exactly one PIXEL. Watched through
+        // tools/chrome over a session of real casts, totalPx reads 64 and never
+        // anything else, because the backing store is the game's own resolution —
+        // so fillPx/64 IS k/64 by construction. Fifteen distinct locked charges
+        // came back 0.063, 0.094, 0.141, 0.156 ... 0.813, every one of them a whole
+        // rung, the largest departure being the 0.05% that three decimal places of
+        // printout can account for on its own. rawFrac needs no snapping: it is
+        // already exact.
         //
-        // The replay data says the same thing: 585 non-zero readings over five
-        // fishing clips, distance to the nearest rung 0.434% against the 0.391%
-        // that uniformly random readings would give — no clustering, at 32, 64 or
-        // 128 rungs alike. Consistent with a real ladder buried in measurement
-        // noise, which is exactly what the pixel arithmetic above predicts.
+        // Which also explains the recordings, where 585 readings sat no closer to
+        // the rungs than random, at 32, 64 or 128 alike. Those captured the canvas
+        // at its CSS size, 750 tall against the game's 540, so a unit spanned
+        // 750/540 = 1.389px and the gauge measured the ~89px we saw. A rung that
+        // is 1.4px wide, through H.264, against a fill edge the colour masks
+        // resolve to about half a pixel, is a rung that does not survive being
+        // measured. The ladder was there; the capture destroyed it.
         //
-        // So rawFrac ships. Snapping becomes worth turning on if the gauge is ever
-        // read at a canvas size where a rung is comfortably more than a pixel;
-        // `snapped` is in the probe so that day can be recognised rather than
-        // guessed at.
+        // So the snap stays off, and the two measurements say why better than
+        // either does alone: it is an identity at 64px, exactly where it would be
+        // safe, and unreliable at 89px, exactly where it would have to earn its
+        // place. There is no canvas size at which it is worth having. `snapped`
+        // stays in the probe as the check — if it ever diverges from rawFrac on a
+        // live canvas, the gauge is being read at a scale nobody has thought about.
         const snapped = Math.round(rawFrac * RUNGS) / RUNGS;
         const frac = rawFrac;
         return {
