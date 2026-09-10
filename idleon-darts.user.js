@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         IdleOn Darts Helper
 // @namespace    nativerobot
-// @version      1.8
+// @version      1.9
 // @downloadURL https://raw.githubusercontent.com/averagenative/idleon-userscripts/main/idleon-darts.user.js
 // @updateURL   https://raw.githubusercontent.com/averagenative/idleon-userscripts/main/idleon-darts.user.js
 // @description  Draws the predicted dart path and where it lands on the board, wind included, for the Throwy Darts minigame
@@ -379,6 +379,32 @@
       const mx = Math.max(r, g, b), mn = Math.min(r, g, b);
       return mx > 110 && (mx - mn) > 45;
     };
+    // Glyph size gates, as fractions of the crop height rather than raw pixels.
+    // They used to be absolute -- n<10, w 3..16, h 8..18 -- harvested from a
+    // 1326-wide canvas where this crop comes out 51px tall. On a 960-wide
+    // canvas the same crop is 36px and every glyph is 28% smaller, so the "11"
+    // in "11 mph" measured w=6 h=6 n=16 and BOTH digits fell through the h<8
+    // floor. Worse than losing the number: two letterforms out of "mph"
+    // (w=7 h=8 n=30, and w=8 h=13 n=57) sailed past the same gates, so the
+    // reader went on to match leftover letters against digit templates and
+    // could return a confident wrong answer instead of null. Yesterday's cyan
+    // winds reading "6mph" and "7mph" on this canvas are suspect for exactly
+    // that reason, and mph feeds straight into A = windK * mph * W.
+    //
+    // The reference is the 51px crop the templates were harvested at, so the
+    // ratios below are the old constants over 51 (and over 51^2 for the pixel
+    // count, which scales with area). At S.h=36 that gives h 5.7..12.7,
+    // w 2.1..11.3, n>=5: the digits at h=6 are kept, the h=13 ascender of "h"
+    // is now correctly rejected, and the gap rule below still cuts before the
+    // rest of "mph".
+    const REF_H = 51;
+    const k = S.h / REF_H;
+    const G = {
+      nMin: 10 * k * k,
+      wMin: 3 * k, wMax: 16 * k,
+      hMin: 8 * k, hMax: 18 * k,
+      gap: 16 * k          // the space before "mph" starts
+    };
     const seen = new Uint8Array(S.w * S.h), glyphs = [], st = [];
     for (let y = 0; y < S.h; y++) for (let x = 0; x < S.w; x++) {
       const i = y * S.w + x;
@@ -398,7 +424,7 @@
         }
       }
       const w = x1 - x0 + 1, h = y1 - y0 + 1;
-      if (n < 10 || w < 3 || w > 16 || h < 8 || h > 18) continue;
+      if (n < G.nMin || w < G.wMin || w > G.wMax || h < G.hMin || h > G.hMax) continue;
       const g = new Uint8Array(w * h);
       for (const [cx, cy] of cells) g[(cy - y0) * w + (cx - x0)] = 1;
       glyphs.push({ x0, w, h, g });
@@ -407,7 +433,7 @@
     if (!glyphs.length) return null;
     const digits = [];
     for (let i = 0; i < glyphs.length; i++) {
-      if (i > 0 && glyphs[i].x0 - glyphs[i - 1].x0 > 16) break;   // gap before "mph"
+      if (i > 0 && glyphs[i].x0 - glyphs[i - 1].x0 > G.gap) break;   // gap before "mph"
       digits.push(glyphs[i]);
     }
     if (!digits.length || digits.length > 2) return null;
@@ -523,7 +549,53 @@
       ext.push({ deg, reach });
       if (!best || reach > best.reach) best = { deg, reach };
     }
-    if (!best || best.reach < 40 * scale) return null;
+    // A march has to run at least as far as a dart does, or it did not find a
+    // dart. This floor used to be 40 CSS px flat -- absolute pixels again, and
+    // set at less than half of what a real dart actually produces, so it caught
+    // almost nothing. Measured reach for a genuine in-hand dart:
+    //
+    //   live         W=1327.9   83.0 .. 85.8   ->  0.0625 .. 0.0646 W
+    //   08-14        W=1214     82   .. 100    ->  0.0675 .. 0.0824 W
+    //   07-28 16-43  W=1312     66   .. 100    ->  0.0503 .. 0.0762 W
+    //   07-28 17-14  W=1312     66   .. 100    ->  0.0503 .. 0.0762 W
+    //   07-28 19-26  W=1312     69   .. 100    ->  0.0526 .. 0.0762 W
+    //
+    // and on the game-over screen, where the character holds nothing and the
+    // march ran off a 5-pixel scrap of helmet, it was 42.9 css -> 0.0323 W.
+    // The old floor let that through by 2.9px and the helper drew a confident
+    // "+1" from it.
+    //
+    // Do NOT set this by looking at the minimum reach a recording reports:
+    // that minimum is an artifact of wherever the floor already is, because
+    // the floor censors the very tail you are trying to measure. Lowering it
+    // from 0.05 to 0.040 "discovered" reaches of 54-64 that the 0.05 floor had
+    // been hiding, which is circular and nearly shipped a threshold sitting
+    // 0.4px off real data.
+    //
+    // Measured properly, with the floor disabled entirely, the distribution is
+    // bimodal and the gap is obvious (bins are reach in css px on W=1312):
+    //
+    //            17-14              19-26
+    //   30-80     32 (2.5%)          51 (5.5%)    sparse scatter
+    //   80-105  1264 (97.5%)        873 (94.5%)   the dart, sharply from 80
+    //
+    // 2220 accepted frames across the two clips, and the real mode begins at
+    // 80 css = 0.0610 W in both. Live agrees: 83.0-85.8 on W=1327.9 = 0.0625
+    // -0.0646 W. The one measured no-dart march was 42.9 css = 0.0323 W, well
+    // inside the scatter. 0.055 sits in the empty region between the modes --
+    // 11% under the real mode's edge and 41% over the bogus reading -- rather
+    // than being fitted to either edge. It discards the sub-mode scatter too,
+    // which costs nothing: that is 2-5% of frames and the aim survives 400ms
+    // of staleness anyway.
+    //
+    // Note this is a floor, NOT the reach window rejected earlier in this file:
+    // that needed an upper bound too, and the upper end did not transfer across
+    // resolutions. A floor is set from the real distribution, which is well
+    // sampled at both resolutions, and does not care what the top end does.
+    // Caveat for whoever tunes this next: the real side has 800+ samples, the
+    // no-dart side has exactly one.
+    const REACH_MIN_W = 0.055;     // fraction of canvas width
+    if (!best || best.reach < REACH_MIN_W * B.cvW) return null;
     // Narrowing the scan alone only moves the problem: a march that wants to
     // point at the floor now pins at SWEEP_LO instead of -75. But that is the
     // tell. A real aim is an interior maximum — the reach falls away on both
