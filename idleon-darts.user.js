@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         IdleOn Darts Helper
 // @namespace    nativerobot
-// @version      1.9
+// @version      1.10
 // @downloadURL https://raw.githubusercontent.com/averagenative/idleon-userscripts/main/idleon-darts.user.js
 // @updateURL   https://raw.githubusercontent.com/averagenative/idleon-userscripts/main/idleon-darts.user.js
 // @description  Draws the predicted dart path and where it lands on the board, wind included, for the Throwy Darts minigame
@@ -630,6 +630,36 @@
   let frame = 0, board = null, boardT = 0, wind = { key: 'none', deg: 0 };
   let aimDeg = null, aimT = 0, lastAim = null, lastAimF = -99;
   let dartPts = [], lastDartT = 0, flightWind = 'none', flightAim = null;
+  let prevFly = [], lastFlight = null, flightT0 = 0;
+
+  // Every gold blob inside a rectangle of the downscaled frame, in css coords.
+  // The hand search does its own copy of this over the LEFT of the screen; this
+  // one exists for the right, where a thrown dart lives. Kept separate rather
+  // than shared because the two want different rejection rules: the hand search
+  // has to pick one blob out of a cluster on the character, this one wants all
+  // of them so motion can be matched frame to frame.
+  function goldBlobs(I, xa, xb, ya, yb, kx, ky) {
+    xa = Math.max(0, xa | 0); xb = Math.min(I.w, xb | 0);
+    ya = Math.max(0, ya | 0); yb = Math.min(I.h, yb | 0);
+    const seen = new Uint8Array(I.w * I.h), stack = [], out = [];
+    for (let y = ya; y < yb; y++) for (let x = xa; x < xb; x++) {
+      const i = y * I.w + x;
+      if (seen[i] || !isGold(...px(I, x, y))) continue;
+      stack.length = 0; stack.push(i); seen[i] = 1;
+      let n = 0, sx = 0, sy = 0;
+      while (stack.length) {
+        const q = stack.pop(), qx = q % I.w, qy = (q / I.w) | 0;
+        n++; sx += qx; sy += qy;
+        for (const nb of [q - 1, q + 1, q - I.w, q + I.w]) {
+          const nx = nb % I.w, ny = (nb / I.w) | 0;
+          if (ny < ya || ny >= yb || nx < xa || nx >= xb || seen[nb]) continue;
+          if (isGold(...px(I, nx, ny))) { seen[nb] = 1; stack.push(nb); }
+        }
+      }
+      if (n >= 4) out.push({ x: sx / n * kx, y: sy / n * ky, n });
+    }
+    return out;
+  }
 
   // Predict the flight from a launch point and angle.
   function predict(x0, y0, deg, W, H, wnd) {
@@ -704,7 +734,7 @@
     if (!I) { stEl.textContent = readErr; probe({ frame, idle: readErr }); return; }
 
     if (wallFrac(I) < 0.35) {
-      board = null; dartPts = []; aimDeg = null;
+      board = null; dartPts = []; aimDeg = null; prevFly = [];
       if (frame % 15 === 0) stEl.textContent = 'idle\nnot in Throwy Darts';
       probe({ frame, idle: 'gated out: wall < 35%' });
       return;
@@ -834,7 +864,90 @@
     }
 
     // ---- a dart already in the air ----
-    if (cfg.live && hand && dartPts.length) { /* hand still holds one; nothing to do */ }
+    // This used to be a stub: dartPts was declared, cleared once, and never
+    // written, so "Track thrown dart" did nothing and the probe reported
+    // dart:0 forever. It matters because the flight is the only place the
+    // model can actually be checked -- comparing predicted to observed
+    // positions measures vN and gN directly, where a landing point alone
+    // cannot separate them from landN.
+    //
+    // The corridor: left edge past the thrower, right edge short of the board,
+    // because darts already stuck in it keep their fletchings and would look
+    // like a permanent crowd of candidates. Measured on the live canvas, stuck
+    // fletchings sit at css x 1191 against a board at 1272.6, i.e. 0.061 W
+    // clear of it, so 0.08 W excludes them with room to spare. The cost is
+    // that the last stretch of flight is not seen; that is fine, the fit does
+    // not need the impact point.
+    if (cfg.live && board) {
+      const xa = 0.30 * W, xb = board.x - 0.08 * W;
+      const fly = goldBlobs(I, xa / kx, xb / kx, I.h * 0.14, I.h * 0.88, kx, ky);
+      // A dart in flight MOVES; the helmet and the stuck darts do not. Launch
+      // speed is cfg.vN*W ~ 728 css px/s on this canvas, so at rAF rates a
+      // real dart steps roughly 12px per frame. Anything that reappears within
+      // a few px of where it sat last frame is scenery.
+      const STILL = 0.004 * W;               // ~5px, below one frame of travel
+      const STEP  = 0.06 * W;                // ~80px, well over one frame
+      if (dartPts.length) {
+        const last = dartPts[dartPts.length - 1];
+        let pick = null, bd = Infinity;
+        for (const f of fly) {
+          // Forward progress is REQUIRED, not just "not backwards". There is no
+          // drag on the horizontal axis, so a real dart advances by the same
+          // amount every frame for the whole flight -- cfg.vN*W ~ 728 css px/s,
+          // which is ~12px at rAF rates and more in a 30fps replay, always well
+          // over STILL. Accepting a same-place match instead let a finished
+          // track latch onto a stationary fletching and never time out: flights
+          // of 3.2 and 3.7 seconds, and a dart reported in the air for 63% of
+          // all frames when the real duty cycle is nearer a third.
+          if (f.x < last.x + STILL) continue;
+          const d = Math.hypot(f.x - last.x, f.y - last.y);
+          if (d < bd && d <= STEP) { bd = d; pick = f; }
+        }
+        if (pick) { dartPts.push({ t, x: pick.x, y: pick.y }); lastDartT = t; }
+        else if (t - lastDartT > 250) {
+          // Flight over: hand the whole thing to the probe in one piece, with
+          // the aim and wind captured at RELEASE rather than whatever the
+          // sweep has moved on to since.
+          if (dartPts.length >= 4) {
+            lastFlight = {
+              n: dartPts.length, t0: flightT0, dur: +((lastDartT - flightT0) / 1000).toFixed(3),
+              aim: flightAim, wind: flightWind,
+              x0: +dartPts[0].x.toFixed(1), y0: +dartPts[0].y.toFixed(1),
+              pts: dartPts.map(p => ({ dt: +((p.t - flightT0) / 1000).toFixed(3),
+                                       x: +p.x.toFixed(1), y: +p.y.toFixed(1) }))
+            };
+          }
+          dartPts = [];
+        }
+      } else {
+        // No flight in progress: a dart is one that was NOT sitting there last
+        // frame. Matching against the previous frame is what separates a
+        // launch from the scenery, without needing to know where the hand is —
+        // which matters because the moment the dart leaves, the hand search
+        // has no fletching left to find and falls back to the helmet.
+        for (const f of fly) {
+          const wasThere = prevFly.some(p => Math.hypot(p.x - f.x, p.y - f.y) <= STILL);
+          if (wasThere) continue;
+          dartPts = [{ t, x: f.x, y: f.y }];
+          flightT0 = t; lastDartT = t;
+          flightAim = aimDeg !== null ? +aimDeg.toFixed(2) : null;
+          flightWind = { key: wind.key, deg: +(wind.deg || 0).toFixed(1), mph: wind.mph || null };
+          break;
+        }
+      }
+      prevFly = fly;
+      // Draw what was actually observed, so the checkbox does something
+      // visible and a wrong track is obvious rather than silent.
+      if (dartPts.length > 1) {
+        octx.save();
+        octx.strokeStyle = '#38bdf8'; octx.lineWidth = 2;
+        octx.shadowColor = 'rgba(0,0,0,.7)'; octx.shadowBlur = 3;
+        octx.beginPath(); octx.moveTo(dartPts[0].x, dartPts[0].y);
+        for (const p of dartPts) octx.lineTo(p.x, p.y);
+        octx.stroke();
+        octx.restore();
+      }
+    } else { prevFly = []; }
 
     if (frame % 8 === 0) {
       const w = wind.key === 'none' ? 'no wind'
@@ -847,6 +960,12 @@
 
     probe({
       frame, board, wind, aimDeg, hand, hitBand, hitY, dart: dartPts.length,
+      // The finished flight, published once and then left in place until the
+      // next one replaces it: how long it took, where it started, the aim and
+      // wind AT RELEASE, and every observed position. This is what a residual
+      // is computed from -- predicted vs observed at matching dt -- instead of
+      // guessing the release moment backwards from a landing.
+      flight: lastFlight,
       // How far the winning march actually got, in css px. Published because
       // it is the value that says whether findAim followed a DART or just ran
       // off the end of its own search: a dart is a protrusion of finite length,
