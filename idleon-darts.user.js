@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         IdleOn Darts Helper
 // @namespace    nativerobot
-// @version      1.5
+// @version      1.8
 // @downloadURL https://raw.githubusercontent.com/averagenative/idleon-userscripts/main/idleon-darts.user.js
 // @updateURL   https://raw.githubusercontent.com/averagenative/idleon-userscripts/main/idleon-darts.user.js
 // @description  Draws the predicted dart path and where it lands on the board, wind included, for the Throwy Darts minigame
@@ -432,15 +432,41 @@
   // fletching through anything that is NOT the reddish wall, and take the angle
   // that reaches furthest. Validated against 16 real throws: r = 0.97 against
   // the launch angle actually flown.
-  function findAim(B, W, H) {
+  // hx, hy are the fletching in CSS pixels, as picked out of the downscaled
+  // frame by the blob search in the loop. They are only accurate to a /scale
+  // cell, which is why the centroid is re-taken here at native resolution —
+  // but they are accurate enough to say WHICH gold blob is the fletching, and
+  // that is the part the average used to get wrong. Averaging every gold pixel
+  // in the box put the origin between the fletching and whatever else the
+  // character had on: with the gold helmet the origin landed in the head, and
+  // the march then found the torso rather than the dart. See the hand blob
+  // search for the measurements.
+  function findAim(B, W, H, hx, hy) {
     const sx = B.sx / B.cvW * W, sy = B.sy / B.cvH * H;
     const kx = W / B.cvW, ky = H / B.cvH;
-    let gx = 0, gy = 0, gn = 0;
+    const ox = hx / W * B.cvW - B.sx, oy = hy / H * B.cvH - B.sy;
+    const seen = new Uint8Array(B.w * B.h), stack = [];
+    let gx = 0, gy = 0, gn = 0, bestD = Infinity;
     for (let y = 0; y < B.h; y++) for (let x = 0; x < B.w; x++) {
-      if (isGold(...px(B, x, y))) { gx += x; gy += y; gn++; }
+      const i = y * B.w + x;
+      if (seen[i] || !isGold(...px(B, x, y))) continue;
+      stack.length = 0; stack.push(i); seen[i] = 1;
+      let n = 0, ax = 0, ay = 0;
+      while (stack.length) {
+        const q = stack.pop(), qx = q % B.w, qy = (q / B.w) | 0;
+        n++; ax += qx; ay += qy;
+        for (const nb of [q - 1, q + 1, q - B.w, q + B.w]) {
+          if (nb < 0 || nb >= B.w * B.h || seen[nb]) continue;
+          if (Math.abs((nb % B.w) - qx) > 1) continue;   // no wrap at the edges
+          if (isGold(...px(B, nb % B.w, (nb / B.w) | 0))) { seen[nb] = 1; stack.push(nb); }
+        }
+      }
+      if (n < 8) continue;
+      const cx = ax / n, cy = ay / n;
+      const d = (cx - ox) * (cx - ox) + (cy - oy) * (cy - oy);
+      if (d < bestD) { bestD = d; gx = cx; gy = cy; gn = n; }
     }
-    if (gn < 8) return null;
-    gx /= gn; gy /= gn;
+    if (!gn) return null;
     const notWall = (x, y) => {
       if (x < 0 || y < 0 || x >= B.w || y >= B.h) return false;
       const [h, s, v] = px(B, x, y);
@@ -451,7 +477,43 @@
     const R0 = Math.round(18 * scale), R1 = Math.round(100 * scale);
     const ext = [];
     let best = null;
-    for (let deg = -75; deg <= 80; deg++) {
+    // The scan used to start at -75, roughly 50 degrees below anything the
+    // game can actually produce, and that dead zone is where the aim went to
+    // die. Marching down from the fletching runs along the character's own
+    // torso, legs and the platform, which is a longer clear run than the dart
+    // ever offers, so whenever the dart read was weak the winner was whatever
+    // angle pointed at the floor — and the drawn line dived off the bottom of
+    // the screen.
+    //
+    // The real sweep was measured from five independent sources - four
+    // recordings replayed through this same code and one live capture:
+    //
+    //   2026-08-14  1214px canvas   1032 frames   -25.4 .. +65.3
+    //   2026-07-28 16-43  1312px    2938 frames   -25.4 .. +64.6
+    //   2026-07-28 17-14  1312px    2370 frames   -28.0 .. +65.7
+    //   2026-07-28 19-26  1312px    3044 frames   -25.9 .. +65.0
+    //   live        1327.9px         125 frames   -25.5 .. +64.8
+    //
+    // ~11,200 accepted aims, and not one below -30 in any of them. The floor
+    // is NOT a tight constant: four sources cluster at -25.4..-25.9 and the
+    // fifth sits 2.6 degrees lower at -28.0, so treat -28 as the observed
+    // worst case rather than the true limit. In the live capture 38 further
+    // frames sat at -75.0 .. -70.8 - jammed against the old scan floor, with
+    // 44.5 degrees of empty space between them and the nearest real reading.
+    // Nothing legitimate lives down there.
+    //
+    // SWEEP_LO is set 12 degrees under the worst observed floor rather than
+    // hugging it. An earlier draft used -35, which left only 2 degrees of
+    // clearance against that -28.0 clip; since a fifth source moved the floor
+    // once, a sixth could move it again, and widening costs nothing because
+    // the boundary test below still catches a march that runs out of range. Angles are resolution independent, which is why this is
+    // the axis to guard on: reach looked like a perfect separator within one
+    // session (real 83-85.8 against dives at 59.5/73.3/80.2/99.6) but the same
+    // measurement off the recording spread to 82-100, and normalised by canvas
+    // width the two disagreed by 10%. A reach window wide enough for both lets
+    // the dives back in, so it is deliberately not used here.
+    const SWEEP_LO = -40;
+    for (let deg = SWEEP_LO; deg <= 80; deg++) {
       const th = deg * Math.PI / 180, ux = Math.cos(th), uy = -Math.sin(th);
       let reach = R0, gap = 0;
       for (let r = R0; r <= R1; r++) {
@@ -462,6 +524,17 @@
       if (!best || reach > best.reach) best = { deg, reach };
     }
     if (!best || best.reach < 40 * scale) return null;
+    // Narrowing the scan alone only moves the problem: a march that wants to
+    // point at the floor now pins at SWEEP_LO instead of -75. But that is the
+    // tell. A real aim is an interior maximum — the reach falls away on both
+    // sides of it — whereas a march that ran out of range is still climbing
+    // when the scan stops, so it sits hard against the boundary. Every one of
+    // the 38 dive frames measured was within 4.2 degrees of the floor, so a
+    // 5-degree boundary band catches them all; the lowest real reading in
+    // ~11,200 aims was -28.0, which is 7 degrees clear of the -35 cutoff.
+    // Rejecting the boundary costs nothing real and removes what the clamp
+    // leaves behind.
+    if (best.deg <= SWEEP_LO + 5) return null;
     const near = ext.filter(e => e.reach >= best.reach - 4 * scale);
     if (near.length > 34) return null;              // a broad plateau is the body, not a dart
     let sw = 0, sd = 0;
@@ -578,8 +651,30 @@
     // gold pixel on screen. Averaging dragged the "hand" into the bottom-left
     // corner whenever the "Get 9 Bullseye in a row" trophy hint was showing,
     // because its trophy icons are gold too. The hint sits in the bottom band
-    // and the HUD in the top one, so both are cut out; of what remains the
-    // leftmost blob is the hand, since a thrown dart only ever travels right.
+    // and the HUD in the top one, so both are cut out.
+    //
+    // Which of the remaining blobs is the fletching used to be answered with
+    // "the leftmost one, since a thrown dart only ever travels right". That is
+    // wrong whenever the character is WEARING something gold. Measured on the
+    // gold helmet, in the 250x250 native box around the player: the helmet is
+    // 261 gold pixels (h 42.0, s 0.57) against the fletching's 156 (h 46.9,
+    // s 0.80), and it fragments into seven blobs because the sprite's dark
+    // outline runs between the strands. The leftmost of those sits at x=116
+    // where the fletching is at x=142, so the "hand" latched onto the helmet,
+    // findAim marched from the character's head instead of the chest, and the
+    // longest clear run from there is straight DOWN the torso and legs — which
+    // is why the predicted line dived off the bottom of the screen at
+    // aimDeg -56.8 while the dart was plainly held at about +40.
+    //
+    // Colour cannot separate them: helmets change colour with gear, so any
+    // hue or saturation window that excludes this helmet is only waiting for
+    // the next one. The separation that holds is structural — a helmet is worn
+    // on the head, the dart is held at chest height, so of the gold on the
+    // character the fletching is the LOWEST. The leftmost blob still picks the
+    // character out of the scene (a dart in flight is right of the thrower, and
+    // is what the x cut below is for); we then keep only blobs within a
+    // sprite's width of it and take the lowest of those, so a gold helmet
+    // anchors the search and no longer wins it.
     const hand = (() => {
       const y0 = Math.round(I.h * 0.14), y1 = Math.round(I.h * 0.88);
       // The thrower stays in the left half (measured 331-560px of 1326); the
@@ -587,7 +682,7 @@
       // being mistaken for the one in your hand.
       const x1 = Math.round(I.w * 0.62);
       const seen = new Uint8Array(I.w * I.h), stack = [];
-      let best = null;
+      const blobs = [];
       for (let y = y0; y < y1; y++) for (let x = 0; x < x1; x++) {
         const i = y * I.w + x;
         if (seen[i] || !isGold(...px(I, x, y))) continue;
@@ -604,8 +699,16 @@
           }
         }
         if (n < 4) continue;
-        if (!best || minx < best.minx) best = { x: sx / n * kx, y: sy / n * ky, n, minx };
+        blobs.push({ x: sx / n * kx, y: sy / n * ky, n, minx, cy: sy / n });
       }
+      if (!blobs.length) return null;
+      // The character sprite measured 55 native px wide of 960 (0.057 of the
+      // canvas). 0.08 gives room for a wide helmet either side of the body
+      // without reaching the next thing on screen.
+      const anchor = Math.min(...blobs.map(b => b.minx));
+      const near = blobs.filter(b => b.minx - anchor <= I.w * 0.08);
+      let best = null;
+      for (const b of near) if (!best || b.cy > best.cy) best = b;
       return best;
     })();
 
@@ -613,7 +716,7 @@
     let aim = null;
     if (hand) {
       const B = grabBox(cv, hand.x, hand.y, Math.max(120, W * 0.13), W, H);
-      if (B) aim = findAim(B, W, H);
+      if (B) aim = findAim(B, W, H, hand.x, hand.y);
     }
     if (aim) {
       // The sweep is smooth at roughly 3 deg per frame; anything wilder is the
@@ -672,6 +775,14 @@
 
     probe({
       frame, board, wind, aimDeg, hand, hitBand, hitY, dart: dartPts.length,
+      // How far the winning march actually got, in css px. Published because
+      // it is the value that says whether findAim followed a DART or just ran
+      // off the end of its own search: a dart is a protrusion of finite length,
+      // the character's torso is not, so a march down the body only stops when
+      // it hits the R1 ceiling. Without this in the probe there is no way to
+      // tell those two apart after the fact.
+      aimReach: aim ? +aim.reach.toFixed(1) : null,
+      aimR1: 100,
       cal: { vN: cfg.vN, gN: cfg.gN, windK: cfg.windK, landN: cfg.landN }
     });
   }
