@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         IdleOn Darts Helper
 // @namespace    nativerobot
-// @version      1.10
+// @version      1.11
 // @downloadURL https://raw.githubusercontent.com/averagenative/idleon-userscripts/main/idleon-darts.user.js
 // @updateURL   https://raw.githubusercontent.com/averagenative/idleon-userscripts/main/idleon-darts.user.js
 // @description  Draws the predicted dart path and where it lands on the board, wind included, for the Throwy Darts minigame
@@ -29,9 +29,13 @@
     band: true,        // name the band you would hit
     live: true,        // track a dart already in the air
     debug: false,
-    calVer: 4,
-    // Measured from 16 tracked throws. Speed is normalised by canvas width,
-    // gravity and wind by width too (the game keeps its aspect ratio).
+    calVer: 5,
+    // Confirmed v5 against 12 no-wind flights tracked at 1327.9x747, fitting
+    // position against time directly rather than inferring from landings:
+    // |v| median 734 px/s (sd 6) -> 0.553, and g median 454 px/s^2 (sd 16) ->
+    // 0.607. Both within 1% of the values below, so these are left alone. An
+    // earlier fit off a recording suggested vN was 17% low; that came from 8
+    // sparse flights with a badly conditioned quadratic and was wrong.
     vN: 0.548,         // launch speed / width, per second
     gN: 0.612,         // gravity / height
     // v4: windK re-measured from a recording holding two wind states — four
@@ -41,14 +45,21 @@
     // degeneracy, and both clusters agree: 0.0158 up, 0.0157 down. Symmetric
     // and well-determined, unlike the old 0.0135 (fit tangled with landN).
     windK: 0.0158,     // acceleration per mph, as a fraction of canvas width
-    // The landing residual soaked up part of the wind error while windK was
-    // low — the old -0.074 predicted ~30px high on every throw once windK is
-    // right. Re-fit with the wind term fixed at its measured value: 9 of the
-    // 10 recorded throws land within half a band (the 10th misses by 44px,
-    // just over). The unexplained leftover splits +-20px WITH the wind sign,
-    // so some vertical wind coupling is still not understood — but it is well
-    // inside the 77px band and not worth chasing on 10 throws.
-    landN: -0.023,     // landing correction / height
+    // v5: ZERO, because the thing it was correcting turned out to be a bug.
+    // This term only ever existed to soak up an unexplained landing residual,
+    // and the residual is now explained: findAim under-read the launch angle
+    // by a constant 4.18 deg (see AIM_BIAS), which puts the predicted line
+    // 44-60px below the dart. landN was absorbing roughly a third of that at
+    // -0.023 (-17px on a 747px canvas). With the angle corrected at source,
+    // keeping landN would over-correct in the opposite direction.
+    //
+    // It is zero rather than deleted because a real residual may remain once
+    // the aim is right — vN and gN measure true to 1% (see below), so if
+    // anything is still left it belongs here. Measure it before setting it:
+    // the flight record now carries the launch point and every observed
+    // position, so a residual can be read off directly instead of fitted
+    // through the other three constants.
+    landN: 0,          // landing correction / height
     // Magenta wind stays gated to zero in predict(): its arrow glyph is a
     // third the size of cyan's and its direction read is unreliable — see v3
     // history in git. Zero measures best; not a claim that magenta does nothing.
@@ -56,8 +67,8 @@
     hidden: false,
     px: null, py: null // dragged panel position, viewport px
   }, JSON.parse(localStorage.getItem(KEY) || '{}'));
-  if (cfg.calVer !== 4) {
-    cfg.calVer = 4; cfg.vN = 0.548; cfg.gN = 0.612; cfg.landN = -0.023;
+  if (cfg.calVer !== 5) {
+    cfg.calVer = 5; cfg.vN = 0.548; cfg.gN = 0.612; cfg.landN = 0;
     cfg.windK = 0.0158;
   }
   let saveAt = 0;
@@ -611,7 +622,29 @@
     if (near.length > 34) return null;              // a broad plateau is the body, not a dart
     let sw = 0, sd = 0;
     for (const e of near) { const w = e.reach - (best.reach - 5 * scale); sw += w; sd += w * e.deg; }
-    return { x: sx + gx * kx, y: sy + gy * ky, deg: sd / sw, reach: best.reach / scale };
+    // The march reads the dart's visual axis, and the dart does not fly along
+    // it: measured against 12 no-wind flights tracked by the code below, the
+    // angle actually flown is +4.18 deg steeper than this march reports, with
+    // sd 0.47 and a slope against aim angle of -0.04 deg/deg — a constant
+    // offset, not a scaling error. Uncorrected it puts the predicted line
+    // 44-60px below where the dart lands (shallower aims worse), which is the
+    // long-standing "darts land higher than the line" complaint.
+    //
+    // The old note here claimed this was "validated against 16 real throws:
+    // r = 0.97 against the launch angle actually flown". r is a CORRELATION and
+    // is blind to a constant offset — a reading biased by a fixed 4 degrees
+    // still scores 0.97. That is why this sat undetected: the validation
+    // checked the wrong statistic. Do not re-validate this with a correlation.
+    //
+    // AIM_BIAS is the value measured at the first tracked point of the flight.
+    // Extrapolating back to the launch point suggests the true figure is a
+    // little higher (+5.2 deg, sd 0.98), but that estimate relies on pairing
+    // releases to flights by index — 33 releases against 30 flights — and the
+    // rows with the largest inferred gaps drive it. The flight record now
+    // carries its own launch point (lx, ly) so the next session measures this
+    // directly instead of inferring it; refine AIM_BIAS then, not before.
+    const AIM_BIAS = 4.18;
+    return { x: sx + gx * kx, y: sy + gy * ky, deg: sd / sw + AIM_BIAS, reach: best.reach / scale };
   }
 
   // ---------- debug probe ----------
@@ -630,7 +663,7 @@
   let frame = 0, board = null, boardT = 0, wind = { key: 'none', deg: 0 };
   let aimDeg = null, aimT = 0, lastAim = null, lastAimF = -99;
   let dartPts = [], lastDartT = 0, flightWind = 'none', flightAim = null;
-  let prevFly = [], lastFlight = null, flightT0 = 0;
+  let prevFly = [], lastFlight = null, flightT0 = 0, flightLX = null, flightLY = null;
 
   // Every gold blob inside a rectangle of the downscaled frame, in css coords.
   // The hand search does its own copy of this over the LEFT of the screen; this
@@ -912,6 +945,11 @@
             lastFlight = {
               n: dartPts.length, t0: flightT0, dur: +((lastDartT - flightT0) / 1000).toFixed(3),
               aim: flightAim, wind: flightWind,
+              // Where predict() was told the dart starts, captured at release.
+              // Without this the launch point has to be recovered by pairing
+              // releases to flights by index, which does not survive a release
+              // that produces too short a track to publish.
+              lx: flightLX, ly: flightLY,
               x0: +dartPts[0].x.toFixed(1), y0: +dartPts[0].y.toFixed(1),
               pts: dartPts.map(p => ({ dt: +((p.t - flightT0) / 1000).toFixed(3),
                                        x: +p.x.toFixed(1), y: +p.y.toFixed(1) }))
@@ -931,6 +969,8 @@
           dartPts = [{ t, x: f.x, y: f.y }];
           flightT0 = t; lastDartT = t;
           flightAim = aimDeg !== null ? +aimDeg.toFixed(2) : null;
+          flightLX = aim ? +aim.x.toFixed(1) : (hand ? +hand.x.toFixed(1) : null);
+          flightLY = aim ? +aim.y.toFixed(1) : (hand ? +hand.y.toFixed(1) : null);
           flightWind = { key: wind.key, deg: +(wind.deg || 0).toFixed(1), mph: wind.mph || null };
           break;
         }
@@ -986,7 +1026,7 @@
   $('#live').onchange  = e => { cfg.live = e.target.checked; save(); };
   $('#debug').onchange = e => { cfg.debug = e.target.checked; save(); };
   $('#cal').onclick = () => {
-    cfg.vN = 0.548; cfg.gN = 0.612; cfg.landN = -0.023;
+    cfg.vN = 0.548; cfg.gN = 0.612; cfg.landN = 0;
     cfg.windK = 0.0158;
     save();
   };
