@@ -14,6 +14,7 @@
     z: 2147483644,
     theme: { dot: '#38bdf8', ac: '#0284c7' },
     slot: { top: 12, left: 460, width: 214, nub: 60 },
+    dockOrder: 3,  helper: true,
     overlay: true,
     hotkeys: { F4: 'toggle', F3: 'hide' },
     keyHint: 'F4',

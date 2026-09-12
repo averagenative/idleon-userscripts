@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         IdleOn Helper Suite
 // @namespace    nativerobot
-// @version      1.33
+// @version      1.34
 // @downloadURL https://raw.githubusercontent.com/averagenative/idleon-userscripts/main/idleon-suite.user.js
 // @updateURL   https://raw.githubusercontent.com/averagenative/idleon-userscripts/main/idleon-suite.user.js
 // @description  All-in-one: autoclicker + Hoops, Fishing and Darts minigame helpers for Legends of IdleOn, each one individually switchable
@@ -65,7 +65,14 @@
   // ---------- which helpers are on ----------
   const SUITE_KEY = 'idleon_suite';
   const ALL_ON = { clicker: true, hoops: true, fishing: true, darts: true };
-  const suite = Object.assign({ collapsed: false, hidden: false },
+  // layout: 'free' keeps the dragged-anywhere behaviour every version until now
+  // had, and stays the default so an upgrade moves nobody's panels. 'left' and
+  // 'top' dock them into one column or one row.
+  // solo: opening a helper closes the other helpers. Only meaningful docked,
+  // where they share a column; see the collapse handler.
+  // follow: opt in to letting the active minigame open its own helper.
+  const suite = Object.assign({ collapsed: false, hidden: false,
+                                layout: 'free', solo: true, follow: false },
                               JSON.parse(localStorage.getItem(SUITE_KEY) || '{}'));
   suite.enabled = Object.assign({}, ALL_ON, suite.enabled);
   const saveSuite = () => localStorage.setItem(SUITE_KEY, JSON.stringify(suite));
@@ -129,6 +136,52 @@
     cache = { f: frameId, cv, scale, img, err: grabErr };
     return img;
   }
+
+  // ---------- docked layouts ----------
+  // Five panels is a lot of furniture to arrange by hand every session, and
+  // only one helper is ever useful at a time — you are in exactly one minigame.
+  // Docking stacks them against an edge in a fixed order and takes over their
+  // positions; the saved px/py are left untouched so switching back to 'free'
+  // restores exactly where things were.
+  const docks = [];                 // { def, ui }, sorted by def.dockOrder
+  const DOCK_EDGE = 10, DOCK_GAP = 8;
+  let relayoutPending = false;
+
+  function relayout() {
+    if (suite.layout === 'free') {
+      for (const d of docks) d.ui.place();
+      return;
+    }
+    const vert = suite.layout === 'left';
+    // ?? not ||: the hub is dockOrder 0, which || would treat as missing and
+    // sort to the bottom of its own dock.
+    const list = docks.slice().sort((a, b) => (a.def.dockOrder ?? 99) - (b.def.dockOrder ?? 99));
+    let x = DOCK_EDGE, y = DOCK_EDGE;
+    for (const { ui } of list) {
+      if (ui.cfg.hidden) continue;          // hidden panels are a nub, not a slot
+      const p = ui.panel;
+      p.style.right = 'auto';
+      p.style.left = x + 'px';
+      p.style.top = y + 'px';
+      const r = p.getBoundingClientRect();
+      if (vert) y += r.height + DOCK_GAP;
+      else x += r.width + DOCK_GAP;
+    }
+  }
+
+  // The hub owns the layout controls, but a drag out of a dock has to change
+  // the layout from inside makePanel. This is the seam between the two.
+  let onLayoutChange = () => {};
+  function syncLayout() { relayout(); onLayoutChange(); }
+
+  // Collapsing a panel changes every panel below it, so the re-stack is
+  // coalesced to one pass per frame rather than run per panel per change.
+  function relayoutSoon() {
+    if (relayoutPending) return;
+    relayoutPending = true;
+    requestAnimationFrame(() => { relayoutPending = false; relayout(); });
+  }
+  window.addEventListener('resize', relayoutSoon);
 
   // ---------- panel chrome ----------
   // Every panel is the same furniture around a different body: a title bar
@@ -245,12 +298,17 @@
       minBtn.textContent = cfg.collapsed ? '+' : '–';
       panel.style.display = cfg.hidden ? 'none' : '';
       nub.style.display = cfg.hidden ? '' : 'none';
+      relayoutSoon();               // heights and occupancy just changed
     }
 
     // drag
     let dx = 0, dy = 0, drag = false;
     $('#hd').addEventListener('mousedown', e => {
       if (e.target.id === 'min') return;
+      // Dragging out of a dock means you want it somewhere else, so the dock
+      // gets out of the way rather than snapping the panel back and looking
+      // broken. "Reset panel layout" puts it back.
+      if (suite.layout !== 'free') { suite.layout = 'free'; saveSuite(); syncLayout(); }
       drag = true;
       const r = panel.getBoundingClientRect();
       dx = e.clientX - r.left; dy = e.clientY - r.top;
@@ -278,6 +336,7 @@
         ui.save(); place(); chrome();
       },
       dot: $('#dot'), runBtn: $('#run'), stEl: $('#st'), nub, minBtn, body,
+      place,                   // so a dock can hand positions back on the way out
       save: () => {},          // replaced by the module, which owns its store
       // Keep every control out of the tab order and drop focus as soon as it
       // is released, so a Space or Enter aimed at the game can't re-fire
@@ -296,10 +355,28 @@
         for (const [tg, ty, fn, cap] of bound) tg.removeEventListener(ty, fn, cap);
         roots.delete(root);
         host.remove();
+        const i = docks.findIndex(d => d.ui === ui);
+        if (i >= 0) docks.splice(i, 1);
+        relayoutSoon();
       }
     };
 
-    minBtn.addEventListener('click', () => { cfg.collapsed = !cfg.collapsed; ui.save(); chrome(); });
+    docks.push({ def, ui });
+    minBtn.addEventListener('click', () => {
+      cfg.collapsed = !cfg.collapsed;
+      ui.save();
+      // Solo closes the other HELPERS when you open one — not the clicker,
+      // which is useful alongside any of them, and not the suite panel. Only
+      // while docked: in the free layout the panels are wherever you put them
+      // and collapsing one you never touched would just look like a bug.
+      if (!cfg.collapsed && suite.solo && suite.layout !== 'free' && def.helper) {
+        for (const d of docks) {
+          if (d.ui === ui || !d.def.helper || d.ui.cfg.collapsed) continue;
+          d.ui.cfg.collapsed = true; d.ui.save(); d.ui.chrome();
+        }
+      }
+      chrome();
+    });
     nub.addEventListener('click', () => { cfg.hidden = false; ui.save(); chrome(); });
     return ui;
   }
@@ -428,6 +505,7 @@
     z: 2147483646,
     theme: { dot: '#4ade80', ac: '#2563eb', stop: '#dc2626' },
     slot: { top: 12, right: 12, width: 210, nub: 24 },
+    dockOrder: 1,
     overlay: false,
     hotkeys: { F8: 'toggle', F9: 'panic', F10: 'hide' },
     keyHint: 'F8',
@@ -751,6 +829,7 @@
     z: 2147483645,
     theme: { dot: '#f87171', ac: '#dc2626' },
     slot: { top: 12, left: 220, width: 228, nub: 42 },
+    dockOrder: 2,  helper: true,
     overlay: true,
     hotkeys: { F7: 'toggle', F6: 'hide' },
     keyHint: 'F7',
@@ -1604,7 +1683,10 @@
         cfg.scale = +b.dataset.s; tracks = []; save(); sync();
       }));
 
-      return { loop, sync, toggle };
+      // For the suite's auto-open: the platform is found every frame the court is up.
+      // Reusing the loop's own state rather than testing the screen again --
+      // a second detector here would be one more thing to drift.
+      return { loop, sync, toggle, active: () => plat != null };
     }
   };
 
@@ -1670,6 +1752,7 @@
     z: 2147483644,
     theme: { dot: '#38bdf8', ac: '#0284c7' },
     slot: { top: 12, left: 460, width: 214, nub: 60 },
+    dockOrder: 3,  helper: true,
     overlay: true,
     hotkeys: { F4: 'toggle', F3: 'hide' },
     keyHint: 'F4',
@@ -2633,7 +2716,10 @@
         save();
       };
 
-      return { loop, sync, toggle };
+      // For the suite's auto-open: the lane goes null the moment the fishing spot is off screen.
+      // Reusing the loop's own state rather than testing the screen again --
+      // a second detector here would be one more thing to drift.
+      return { loop, sync, toggle, active: () => lane != null };
     }
   };
 
@@ -2729,6 +2815,7 @@
     z: 2147483643,
     theme: { dot: '#fbbf24', ac: '#d97706' },
     slot: { top: 12, left: 686, width: 216, nub: 78 },
+    dockOrder: 4,  helper: true,
     overlay: true,
     hotkeys: { F2: 'toggle', F1: 'hide' },
     keyHint: 'F2',
@@ -3681,7 +3768,10 @@
         save();
       };
 
-      return { loop, sync, toggle };
+      // For the suite's auto-open: the board is nulled by the wall gate and after 900ms stale.
+      // Reusing the loop's own state rather than testing the screen again --
+      // a second detector here would be one more thing to drift.
+      return { loop, sync, toggle, active: () => board != null };
     }
   };
 
@@ -3695,6 +3785,7 @@
     z: 2147483647,
     theme: { dot: '#a78bfa', ac: '#7c3aed' },
     slot: { top: 12, left: 12, width: 196, nub: 6 },
+    dockOrder: 0,
     overlay: false,
     bodyHTML:
       // Each row: the helper's name, its toggle hotkey, an eye that shows or
@@ -3708,6 +3799,13 @@
         `<button class="eye" id="eye-${m.id}" data-m="${m.id}">\u25cf</button> ` +
         `<input id="en-${m.id}" type="checkbox"></span></div>`
       ).join('\n        ') + `
+        <hr>
+        <div class="row"><label>Layout</label><span class="seg">
+          <button id="lay-free" data-l="free">Free</button>
+          <button id="lay-left" data-l="left">Left</button>
+          <button id="lay-top" data-l="top">Top</button></span></div>
+        <div class="row"><label>One helper at a time</label><input id="solo" type="checkbox"></div>
+        <div class="row"><label>Auto-open active</label><input id="follow" type="checkbox"></div>
         <hr>
         <button class="btn sm" id="panels">Hide all panels</button>
         <button class="btn sm" id="reset">Reset panel layout</button>
@@ -3732,6 +3830,12 @@
         eye.className = 'eye' + (off ? ' off' : '');
       }
       hub.$('#panels').textContent = anyShown() ? 'Hide all panels' : 'Show all panels';
+      for (const l of ['free', 'left', 'top'])
+        hub.$('#lay-' + l).classList.toggle('sel', suite.layout === l);
+      hub.$('#solo').checked = !!suite.solo;
+      hub.$('#follow').checked = !!suite.follow;
+      // Both only bite in a dock; saying so beats leaving them looking broken.
+      hub.$('#solo').disabled = hub.$('#follow').disabled = suite.layout === 'free';
       hub.chrome();
     }
 
@@ -3744,6 +3848,12 @@
         syncHub();
       };
     }
+    for (const l of ['free', 'left', 'top'])
+      hub.$('#lay-' + l).onclick = () => { suite.layout = l; saveSuite(); syncLayout(); };
+    hub.$('#solo').onchange = e => { suite.solo = e.target.checked; saveSuite(); };
+    hub.$('#follow').onchange = e => { suite.follow = e.target.checked; saveSuite(); };
+    onLayoutChange = syncHub;
+
     hub.$('#panels').onclick = () => {
       const hide = anyShown();
       for (const m of MODULES) {
@@ -3764,13 +3874,47 @@
         else { m.cfg.px = null; m.cfg.py = null; m.cfg.hidden = false; m.cfg.collapsed = false; m.save(); }
       }
       hub.reset();
+      suite.layout = 'free'; saveSuite();
+      syncLayout();
       syncHub();
     };
+
+    // Opt-in: the helper whose minigame is on screen opens itself and the other
+    // helpers close. Driven off each helper's own detection -- the variable it
+    // already keeps for "I can see my minigame" -- so there is no second copy
+    // of any detector here to drift out of step.
+    //
+    // Only acts on a CHANGE of which helper is active, so a manual collapse is
+    // not immediately undone; and it does nothing until a helper has been
+    // active for a moment, because the detectors flicker while a screen loads
+    // and a layout that flickers with them is worse than one that lags.
+    let followWas = null, followSince = 0, followCand = null;
+    function followTick() {
+      if (!suite.follow || suite.layout === 'free') { followWas = null; return; }
+      let now = null;
+      for (const m of MODULES) {
+        const inst = live.get(m.id);
+        if (m.helper && inst && inst.active && inst.active()) { now = m.id; break; }
+      }
+      const t = performance.now();
+      if (now !== followCand) { followCand = now; followSince = t; return; }
+      if (t - followSince < 600 || now === followWas) return;
+      followWas = now;
+      for (const m of MODULES) {
+        if (!m.helper) continue;
+        const inst = live.get(m.id);
+        if (!inst) continue;
+        const want = m.id === now;
+        if (m.cfg.collapsed !== !want) { m.cfg.collapsed = !want; m.save(); inst.ui.chrome(); }
+      }
+    }
 
     for (const m of MODULES) if (suite.enabled[m.id]) startModule(m);
 
     hub.settle();
     syncHub();
+    syncLayout();
+    setInterval(followTick, 250);
     requestAnimationFrame(driver);
   }
 
