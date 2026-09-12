@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         IdleOn Darts Helper
 // @namespace    nativerobot
-// @version      1.5
+// @version      1.14
 // @downloadURL https://raw.githubusercontent.com/averagenative/idleon-userscripts/main/idleon-darts.user.js
 // @updateURL   https://raw.githubusercontent.com/averagenative/idleon-userscripts/main/idleon-darts.user.js
 // @description  Draws the predicted dart path and where it lands on the board, wind included, for the Throwy Darts minigame
@@ -29,9 +29,13 @@
     band: true,        // name the band you would hit
     live: true,        // track a dart already in the air
     debug: false,
-    calVer: 4,
-    // Measured from 16 tracked throws. Speed is normalised by canvas width,
-    // gravity and wind by width too (the game keeps its aspect ratio).
+    calVer: 6,
+    // Confirmed v5 against 12 no-wind flights tracked at 1327.9x747, fitting
+    // position against time directly rather than inferring from landings:
+    // |v| median 734 px/s (sd 6) -> 0.553, and g median 454 px/s^2 (sd 16) ->
+    // 0.607. Both within 1% of the values below, so these are left alone. An
+    // earlier fit off a recording suggested vN was 17% low; that came from 8
+    // sparse flights with a badly conditioned quadratic and was wrong.
     vN: 0.548,         // launch speed / width, per second
     gN: 0.612,         // gravity / height
     // v4: windK re-measured from a recording holding two wind states — four
@@ -40,25 +44,67 @@
     // the clusters solves for the wind strength independently of the v/g/land
     // degeneracy, and both clusters agree: 0.0158 up, 0.0157 down. Symmetric
     // and well-determined, unlike the old 0.0135 (fit tangled with landN).
-    windK: 0.0158,     // acceleration per mph, as a fraction of canvas width
-    // The landing residual soaked up part of the wind error while windK was
-    // low — the old -0.074 predicted ~30px high on every throw once windK is
-    // right. Re-fit with the wind term fixed at its measured value: 9 of the
-    // 10 recorded throws land within half a band (the 10th misses by 44px,
-    // just over). The unexplained leftover splits +-20px WITH the wind sign,
-    // so some vertical wind coupling is still not understood — but it is well
-    // inside the 77px band and not worth chasing on 10 throws.
-    landN: -0.023,     // landing correction / height
-    // Magenta wind stays gated to zero in predict(): its arrow glyph is a
-    // third the size of cyan's and its direction read is unreliable — see v3
-    // history in git. Zero measures best; not a claim that magenta does nothing.
+    // v6: derived, not fitted. The minigame's flight step is
+    //     vx += windX/600 ;  vy += windY/750
+    // at Engine.STEP_SIZE = 10ms, i.e. 100 logic updates a second, on a 960x540
+    // design canvas. A per-step velocity bump of k converts to k*10000 px/s^2,
+    // so the vertical term is windY*13.333 game px/s^2, and windX/windY are the
+    // wind vector whose magnitude is exactly the displayed mph (the game takes
+    // mag = ceil(hypot(windX,windY)) for the readout). Scaling to this canvas:
+    //     windK = 13.333 / 960 = 0.01389
+    // The horizontal works out to the same number once HV=1.25 is applied,
+    // which is the 750/600 ratio and is where HV comes from in the first place.
+    //
+    // This lands on top of the empirical figure: wind acceleration measured off
+    // 104 tracked flights came to |a| ~18 px/s^2 per mph, against 13.333*W/960
+    // = 18.4 for this canvas. The old 0.0158 implied 21.0 and was ~14% high.
+    windK: 0.01389,    // acceleration per mph, as a fraction of canvas width
+    // v5: ZERO, because the thing it was correcting turned out to be a bug.
+    // This term only ever existed to soak up an unexplained landing residual,
+    // and the residual is now explained: findAim under-read the launch angle
+    // by a constant 4.18 deg (see AIM_BIAS), which puts the predicted line
+    // 44-60px below the dart. landN was absorbing roughly a third of that at
+    // -0.023 (-17px on a 747px canvas). With the angle corrected at source,
+    // keeping landN would over-correct in the opposite direction.
+    //
+    // Zero is now MEASURED, not provisional. With the aim corrected, the
+    // shipped predict() was run from each recorded launch point and compared
+    // against every observed position of 19 no-wind tracked flights: 16 of the
+    // 19 track the real dart at 1.6-8.3px rms over the whole arc, and observed
+    // minus predicted at the end of tracking averages +0.1px (sd 11.2). There
+    // is no residual left for this term to hold. The three that miss start
+    // wrong rather than drift wrong -- their launch point was recorded far from
+    // where the dart was first seen -- so they measure the launch capture, not
+    // the flight model.
+    //
+    // Beware the trap that made this look otherwise: pairing a landing on the
+    // board against "the last prediction before it landed" gives a mean of
+    // -75px with sd 88 even now, because the dart is airborne for about a
+    // second while the aim sweep moves on, so the prediction being compared
+    // belongs to a later aim. That method cannot measure this and should not be
+    // used to re-tune landN. Compare against the tracked flight instead.
+    landN: 0,          // landing correction / height
+    // v6: magenta is NO LONGER gated. The colour was never a kind of wind, it is
+    // a strength tier — the game picks the arrow sprite as
+    //     mag < 10 ? DartWind0 : mag < 18 ? DartWind1 : DartWind2
+    // so cyan is simply every wind under 10 mph and magenta is 10-17. Every
+    // cyan logged here came in at 4/6/8/9 mph and every magenta at 10/11/13,
+    // which is that boundary exactly. Gating magenta therefore threw away the
+    // STRONGEST winds, modelling a 13 mph crosswind as still air.
+    //
+    // The direction read that justified the gate was genuinely broken, but not
+    // because of magenta: it was measured through the /scale downscale and
+    // dragged by stray pixels at the window edge. Both are fixed in readWind.
+    // Measured on the sprites themselves, the unrotated arrow's principal axis
+    // sits at +1.43 deg (DartWind0) and +2.13 deg (DartWind1) — the two glyphs
+    // agree to under a degree, so there is no per-colour correction to make.
     collapsed: false,
     hidden: false,
     px: null, py: null // dragged panel position, viewport px
   }, JSON.parse(localStorage.getItem(KEY) || '{}'));
-  if (cfg.calVer !== 4) {
-    cfg.calVer = 4; cfg.vN = 0.548; cfg.gN = 0.612; cfg.landN = -0.023;
-    cfg.windK = 0.0158;
+  if (cfg.calVer !== 6) {
+    cfg.calVer = 6; cfg.vN = 0.548; cfg.gN = 0.612; cfg.landN = 0;
+    cfg.windK = 0.01389;
   }
   let saveAt = 0;
   const save = () => localStorage.setItem(KEY, JSON.stringify(cfg));
@@ -232,6 +278,33 @@
     } catch (e) { return null; }
   }
 
+  // Native-resolution crop of the wind arrow. The direction used to be read off
+  // the /scale frame, where the arrow survives as ~47 pixels, and that is where
+  // its noise came from -- not from the method. Rotating the real glyph through
+  // a known sweep and re-reading it at each resolution:
+  //
+  //   scale 1  451px   error sd 0.6 deg   worst  1.3
+  //   scale 2  148px   error sd 2.2 deg   worst  7.0
+  //   scale 4   47px   error sd 9.7 deg   worst 22.4   <- what this used to use
+  //   scale 6   25px   error sd 14.5 deg  worst 40.3
+  //
+  // At native resolution the principal axis tracks rotation to about a degree.
+  // Same failure as the fishing gauge in 2232d91 and the mph glyph gates: a
+  // measurement taken through the downscale that only needed the full frame.
+  const windC = document.createElement('canvas');
+  const wctx = windC.getContext('2d', { willReadFrequently: true });
+  function grabWind(cv) {
+    const sx = Math.round(cv.width * 0.56), sw = Math.round(cv.width * 0.12);
+    const sy = Math.round(cv.height * 0.02), sh = Math.round(cv.height * 0.10);
+    if (sw < 8 || sh < 8) return null;
+    if (windC.width !== sw || windC.height !== sh) { windC.width = sw; windC.height = sh; }
+    try {
+      wctx.clearRect(0, 0, sw, sh);
+      wctx.drawImage(cv, sx, sy, sw, sh, 0, 0, sw, sh);
+      return { d: wctx.getImageData(0, 0, sw, sh).data, w: sw, h: sh };
+    } catch (e) { return null; }
+  }
+
   function hsv(r, g, b) {
     const mx = r > g ? (r > b ? r : b) : (g > b ? g : b);
     const mn = r < g ? (r < b ? r : b) : (g < b ? g : b);
@@ -319,18 +392,53 @@
   // Read from the colour of the HUD arrow rather than the "N mph" text: cyan and
   // magenta are unmistakable and need no OCR.
   // The arrow ROTATES — the same 9 mph shows pointing up-right, level, and
-  // down-right — so wind has a 2D direction, not just a strength. Its principal
-  // axis gives that direction; every arrow observed so far points rightward, so
-  // the axis is resolved toward +x. Colour is only a coarse strength band: 4 mph
-  // and 9 mph are both cyan, so colour cannot stand in for speed.
-  function readWind(I) {
-    const pts = [];
-    for (let y = Math.round(I.h * 0.02); y < Math.round(I.h * 0.12); y++)
-      for (let x = Math.round(I.w * 0.56); x < Math.round(I.w * 0.68); x++) {
-        const [h, s, v] = px(I, x, y);
+  // down-right — so wind has a 2D direction, not just a strength. Colour is only
+  // a coarse strength band: 4 mph and 9 mph are both cyan, so colour cannot
+  // stand in for speed.
+  //
+  // CAUTION: the principal axis is NOT the direction the arrow points, and the
+  // old note here saying it was is wrong. The glyph is a chunky double chevron
+  // that narrows at both ends, and its axis of greatest variance sits at a fixed
+  // angle to its point. Rotating a captured glyph through a known sweep shows
+  // the axis tracking rotation almost exactly — error sd 0.6 deg at native
+  // resolution — but with a CONSTANT offset of about 45 deg against the frame it
+  // was captured in. So this function returns a value that is rotation-correct
+  // and origin-wrong: differences between two readings are trustworthy, the
+  // absolute bearing is not.
+  //
+  // Pinning the offset needs one arrow whose true direction is independently
+  // known, and it probably needs one PER COLOUR: the magenta glyph is a
+  // different sprite from the cyan one (a third the size, per the v3 notes), so
+  // there is no reason for their axes to sit at the same angle to their points.
+  // Until that is measured, predict() is being handed a bearing with an unknown
+  // constant error, which is why windK's vertical component and the HV ratio
+  // cannot be fitted from flight data — every such fit takes sin(deg) as input.
+  // Do not "calibrate" windK against this until the offset is anchored.
+  // S is the native-resolution crop from grabWind, so the whole image IS the
+  // window -- no sub-window arithmetic here any more.
+  function readWind(S) {
+    if (!S) return { key: 'none', deg: 0 };
+    let pts = [];
+    for (let y = 0; y < S.h; y++)
+      for (let x = 0; x < S.w; x++) {
+        const [h, s, v] = px(S, x, y);
         if (s > 0.35 && v > 0.6 && ((h > 165 && h < 215) || (h > 270 && h < 335))) pts.push({ x, y, h });
       }
     if (pts.length < 8) return { key: 'none', deg: 0 };
+    // The window catches a few matching pixels hard against its left edge that
+    // are not part of the arrow at all -- seen as a stray column many pixels
+    // clear of the glyph in a captured mask. They are far enough out to drag
+    // the centroid, and the principal axis with it, so cut anything well
+    // outside the main mass before measuring.
+    {
+      let cx = 0, cy = 0;
+      for (const q of pts) { cx += q.x; cy += q.y; }
+      cx /= pts.length; cy /= pts.length;
+      const d = pts.map(q => Math.hypot(q.x - cx, q.y - cy)).sort((a, b) => a - b);
+      const cut = d[Math.floor(d.length * 0.95)] * 1.6;
+      const core = pts.filter(q => Math.hypot(q.x - cx, q.y - cy) <= cut);
+      if (core.length >= 8) pts = core;
+    }
     const n = pts.length;
     let mx = 0, my = 0;
     for (const q of pts) { mx += q.x; my += q.y; }
@@ -379,6 +487,32 @@
       const mx = Math.max(r, g, b), mn = Math.min(r, g, b);
       return mx > 110 && (mx - mn) > 45;
     };
+    // Glyph size gates, as fractions of the crop height rather than raw pixels.
+    // They used to be absolute -- n<10, w 3..16, h 8..18 -- harvested from a
+    // 1326-wide canvas where this crop comes out 51px tall. On a 960-wide
+    // canvas the same crop is 36px and every glyph is 28% smaller, so the "11"
+    // in "11 mph" measured w=6 h=6 n=16 and BOTH digits fell through the h<8
+    // floor. Worse than losing the number: two letterforms out of "mph"
+    // (w=7 h=8 n=30, and w=8 h=13 n=57) sailed past the same gates, so the
+    // reader went on to match leftover letters against digit templates and
+    // could return a confident wrong answer instead of null. Yesterday's cyan
+    // winds reading "6mph" and "7mph" on this canvas are suspect for exactly
+    // that reason, and mph feeds straight into A = windK * mph * W.
+    //
+    // The reference is the 51px crop the templates were harvested at, so the
+    // ratios below are the old constants over 51 (and over 51^2 for the pixel
+    // count, which scales with area). At S.h=36 that gives h 5.7..12.7,
+    // w 2.1..11.3, n>=5: the digits at h=6 are kept, the h=13 ascender of "h"
+    // is now correctly rejected, and the gap rule below still cuts before the
+    // rest of "mph".
+    const REF_H = 51;
+    const k = S.h / REF_H;
+    const G = {
+      nMin: 10 * k * k,
+      wMin: 3 * k, wMax: 16 * k,
+      hMin: 8 * k, hMax: 18 * k,
+      gap: 16 * k          // the space before "mph" starts
+    };
     const seen = new Uint8Array(S.w * S.h), glyphs = [], st = [];
     for (let y = 0; y < S.h; y++) for (let x = 0; x < S.w; x++) {
       const i = y * S.w + x;
@@ -398,7 +532,7 @@
         }
       }
       const w = x1 - x0 + 1, h = y1 - y0 + 1;
-      if (n < 10 || w < 3 || w > 16 || h < 8 || h > 18) continue;
+      if (n < G.nMin || w < G.wMin || w > G.wMax || h < G.hMin || h > G.hMax) continue;
       const g = new Uint8Array(w * h);
       for (const [cx, cy] of cells) g[(cy - y0) * w + (cx - x0)] = 1;
       glyphs.push({ x0, w, h, g });
@@ -407,7 +541,7 @@
     if (!glyphs.length) return null;
     const digits = [];
     for (let i = 0; i < glyphs.length; i++) {
-      if (i > 0 && glyphs[i].x0 - glyphs[i - 1].x0 > 16) break;   // gap before "mph"
+      if (i > 0 && glyphs[i].x0 - glyphs[i - 1].x0 > G.gap) break;   // gap before "mph"
       digits.push(glyphs[i]);
     }
     if (!digits.length || digits.length > 2) return null;
@@ -432,15 +566,41 @@
   // fletching through anything that is NOT the reddish wall, and take the angle
   // that reaches furthest. Validated against 16 real throws: r = 0.97 against
   // the launch angle actually flown.
-  function findAim(B, W, H) {
+  // hx, hy are the fletching in CSS pixels, as picked out of the downscaled
+  // frame by the blob search in the loop. They are only accurate to a /scale
+  // cell, which is why the centroid is re-taken here at native resolution —
+  // but they are accurate enough to say WHICH gold blob is the fletching, and
+  // that is the part the average used to get wrong. Averaging every gold pixel
+  // in the box put the origin between the fletching and whatever else the
+  // character had on: with the gold helmet the origin landed in the head, and
+  // the march then found the torso rather than the dart. See the hand blob
+  // search for the measurements.
+  function findAim(B, W, H, hx, hy) {
     const sx = B.sx / B.cvW * W, sy = B.sy / B.cvH * H;
     const kx = W / B.cvW, ky = H / B.cvH;
-    let gx = 0, gy = 0, gn = 0;
+    const ox = hx / W * B.cvW - B.sx, oy = hy / H * B.cvH - B.sy;
+    const seen = new Uint8Array(B.w * B.h), stack = [];
+    let gx = 0, gy = 0, gn = 0, bestD = Infinity;
     for (let y = 0; y < B.h; y++) for (let x = 0; x < B.w; x++) {
-      if (isGold(...px(B, x, y))) { gx += x; gy += y; gn++; }
+      const i = y * B.w + x;
+      if (seen[i] || !isGold(...px(B, x, y))) continue;
+      stack.length = 0; stack.push(i); seen[i] = 1;
+      let n = 0, ax = 0, ay = 0;
+      while (stack.length) {
+        const q = stack.pop(), qx = q % B.w, qy = (q / B.w) | 0;
+        n++; ax += qx; ay += qy;
+        for (const nb of [q - 1, q + 1, q - B.w, q + B.w]) {
+          if (nb < 0 || nb >= B.w * B.h || seen[nb]) continue;
+          if (Math.abs((nb % B.w) - qx) > 1) continue;   // no wrap at the edges
+          if (isGold(...px(B, nb % B.w, (nb / B.w) | 0))) { seen[nb] = 1; stack.push(nb); }
+        }
+      }
+      if (n < 8) continue;
+      const cx = ax / n, cy = ay / n;
+      const d = (cx - ox) * (cx - ox) + (cy - oy) * (cy - oy);
+      if (d < bestD) { bestD = d; gx = cx; gy = cy; gn = n; }
     }
-    if (gn < 8) return null;
-    gx /= gn; gy /= gn;
+    if (!gn) return null;
     const notWall = (x, y) => {
       if (x < 0 || y < 0 || x >= B.w || y >= B.h) return false;
       const [h, s, v] = px(B, x, y);
@@ -451,7 +611,54 @@
     const R0 = Math.round(18 * scale), R1 = Math.round(100 * scale);
     const ext = [];
     let best = null;
-    for (let deg = -75; deg <= 80; deg++) {
+    // The scan used to start at -75, roughly 50 degrees below anything the
+    // game can actually produce, and that dead zone is where the aim went to
+    // die. Marching down from the fletching runs along the character's own
+    // torso, legs and the platform, which is a longer clear run than the dart
+    // ever offers, so whenever the dart read was weak the winner was whatever
+    // angle pointed at the floor — and the drawn line dived off the bottom of
+    // the screen.
+    //
+    // The real sweep was measured from five independent sources - four
+    // recordings replayed through this same code and one live capture:
+    //
+    //   2026-08-14  1214px canvas   1032 frames   -25.4 .. +65.3
+    //   2026-07-28 16-43  1312px    2938 frames   -25.4 .. +64.6
+    //   2026-07-28 17-14  1312px    2370 frames   -28.0 .. +65.7
+    //   2026-07-28 19-26  1312px    3044 frames   -25.9 .. +65.0
+    //   live        1327.9px         125 frames   -25.5 .. +64.8
+    //
+    // ~11,200 accepted aims, and not one below -30 in any of them. The floor
+    // is NOT a tight constant: four sources cluster at -25.4..-25.9 and the
+    // fifth sits 2.6 degrees lower at -28.0, so treat -28 as the observed
+    // worst case rather than the true limit. In the live capture 38 further
+    // frames sat at -75.0 .. -70.8 - jammed against the old scan floor, with
+    // 44.5 degrees of empty space between them and the nearest real reading.
+    // Nothing legitimate lives down there.
+    //
+    // SWEEP_LO is set 12 degrees under the worst observed floor rather than
+    // hugging it. An earlier draft used -35, which left only 2 degrees of
+    // clearance against that -28.0 clip; since a fifth source moved the floor
+    // once, a sixth could move it again, and widening costs nothing because
+    // the boundary test below still catches a march that runs out of range. Angles are resolution independent, which is why this is
+    // the axis to guard on: reach looked like a perfect separator within one
+    // session (real 83-85.8 against dives at 59.5/73.3/80.2/99.6) but the same
+    // measurement off the recording spread to 82-100, and normalised by canvas
+    // width the two disagreed by 10%. A reach window wide enough for both lets
+    // the dives back in, so it is deliberately not used here.
+    // -50, not -40. The game sweeps the arm as
+    //     arm = -20 + (38 + 15t/(t+30)) * Trigg(sin, ...)
+    // and launches at vy = speed*sin(arm) with screen y DOWN, so this file's
+    // angle is -arm. The amplitude grows from 38 to 53 over a run, which puts
+    // the true aim range at -33 .. +73 deg here. AIM_BIAS is added after the
+    // scan, so a genuine -33 reaches the boundary test as about -37.2 raw — and
+    // the old -40 floor rejected anything at or under -35, clipping the bottom
+    // of a legitimate sweep. Observed readings only reached -28, so this had not
+    // bitten yet, but it would have on a long run at full amplitude. -50 leaves
+    // the rejection band at -45, clear of -37.2, and still catches a march that
+    // ran out of range since those pin within ~4.2 deg of the floor.
+    const SWEEP_LO = -50;
+    for (let deg = SWEEP_LO; deg <= 80; deg++) {
       const th = deg * Math.PI / 180, ux = Math.cos(th), uy = -Math.sin(th);
       let reach = R0, gap = 0;
       for (let r = R0; r <= R1; r++) {
@@ -461,12 +668,91 @@
       ext.push({ deg, reach });
       if (!best || reach > best.reach) best = { deg, reach };
     }
-    if (!best || best.reach < 40 * scale) return null;
+    // A march has to run at least as far as a dart does, or it did not find a
+    // dart. This floor used to be 40 CSS px flat -- absolute pixels again, and
+    // set at less than half of what a real dart actually produces, so it caught
+    // almost nothing. Measured reach for a genuine in-hand dart:
+    //
+    //   live         W=1327.9   83.0 .. 85.8   ->  0.0625 .. 0.0646 W
+    //   08-14        W=1214     82   .. 100    ->  0.0675 .. 0.0824 W
+    //   07-28 16-43  W=1312     66   .. 100    ->  0.0503 .. 0.0762 W
+    //   07-28 17-14  W=1312     66   .. 100    ->  0.0503 .. 0.0762 W
+    //   07-28 19-26  W=1312     69   .. 100    ->  0.0526 .. 0.0762 W
+    //
+    // and on the game-over screen, where the character holds nothing and the
+    // march ran off a 5-pixel scrap of helmet, it was 42.9 css -> 0.0323 W.
+    // The old floor let that through by 2.9px and the helper drew a confident
+    // "+1" from it.
+    //
+    // Do NOT set this by looking at the minimum reach a recording reports:
+    // that minimum is an artifact of wherever the floor already is, because
+    // the floor censors the very tail you are trying to measure. Lowering it
+    // from 0.05 to 0.040 "discovered" reaches of 54-64 that the 0.05 floor had
+    // been hiding, which is circular and nearly shipped a threshold sitting
+    // 0.4px off real data.
+    //
+    // Measured properly, with the floor disabled entirely, the distribution is
+    // bimodal and the gap is obvious (bins are reach in css px on W=1312):
+    //
+    //            17-14              19-26
+    //   30-80     32 (2.5%)          51 (5.5%)    sparse scatter
+    //   80-105  1264 (97.5%)        873 (94.5%)   the dart, sharply from 80
+    //
+    // 2220 accepted frames across the two clips, and the real mode begins at
+    // 80 css = 0.0610 W in both. Live agrees: 83.0-85.8 on W=1327.9 = 0.0625
+    // -0.0646 W. The one measured no-dart march was 42.9 css = 0.0323 W, well
+    // inside the scatter. 0.055 sits in the empty region between the modes --
+    // 11% under the real mode's edge and 41% over the bogus reading -- rather
+    // than being fitted to either edge. It discards the sub-mode scatter too,
+    // which costs nothing: that is 2-5% of frames and the aim survives 400ms
+    // of staleness anyway.
+    //
+    // Note this is a floor, NOT the reach window rejected earlier in this file:
+    // that needed an upper bound too, and the upper end did not transfer across
+    // resolutions. A floor is set from the real distribution, which is well
+    // sampled at both resolutions, and does not care what the top end does.
+    // Caveat for whoever tunes this next: the real side has 800+ samples, the
+    // no-dart side has exactly one.
+    const REACH_MIN_W = 0.055;     // fraction of canvas width
+    if (!best || best.reach < REACH_MIN_W * B.cvW) return null;
+    // Narrowing the scan alone only moves the problem: a march that wants to
+    // point at the floor now pins at SWEEP_LO instead of -75. But that is the
+    // tell. A real aim is an interior maximum — the reach falls away on both
+    // sides of it — whereas a march that ran out of range is still climbing
+    // when the scan stops, so it sits hard against the boundary. Every one of
+    // the 38 dive frames measured was within 4.2 degrees of the floor, so a
+    // 5-degree boundary band catches them all; the lowest real reading in
+    // ~11,200 aims was -28.0, which is 7 degrees clear of the -35 cutoff.
+    // Rejecting the boundary costs nothing real and removes what the clamp
+    // leaves behind.
+    if (best.deg <= SWEEP_LO + 5) return null;
     const near = ext.filter(e => e.reach >= best.reach - 4 * scale);
     if (near.length > 34) return null;              // a broad plateau is the body, not a dart
     let sw = 0, sd = 0;
     for (const e of near) { const w = e.reach - (best.reach - 5 * scale); sw += w; sd += w * e.deg; }
-    return { x: sx + gx * kx, y: sy + gy * ky, deg: sd / sw, reach: best.reach / scale };
+    // The march reads the dart's visual axis, and the dart does not fly along
+    // it: measured against 12 no-wind flights tracked by the code below, the
+    // angle actually flown is +4.18 deg steeper than this march reports, with
+    // sd 0.47 and a slope against aim angle of -0.04 deg/deg — a constant
+    // offset, not a scaling error. Uncorrected it puts the predicted line
+    // 44-60px below where the dart lands (shallower aims worse), which is the
+    // long-standing "darts land higher than the line" complaint.
+    //
+    // The old note here claimed this was "validated against 16 real throws:
+    // r = 0.97 against the launch angle actually flown". r is a CORRELATION and
+    // is blind to a constant offset — a reading biased by a fixed 4 degrees
+    // still scores 0.97. That is why this sat undetected: the validation
+    // checked the wrong statistic. Do not re-validate this with a correlation.
+    //
+    // AIM_BIAS is the value measured at the first tracked point of the flight.
+    // Extrapolating back to the launch point suggests the true figure is a
+    // little higher (+5.2 deg, sd 0.98), but that estimate relies on pairing
+    // releases to flights by index — 33 releases against 30 flights — and the
+    // rows with the largest inferred gaps drive it. The flight record now
+    // carries its own launch point (lx, ly) so the next session measures this
+    // directly instead of inferring it; refine AIM_BIAS then, not before.
+    const AIM_BIAS = 4.18;
+    return { x: sx + gx * kx, y: sy + gy * ky, deg: sd / sw + AIM_BIAS, reach: best.reach / scale };
   }
 
   // ---------- debug probe ----------
@@ -485,6 +771,36 @@
   let frame = 0, board = null, boardT = 0, wind = { key: 'none', deg: 0 };
   let aimDeg = null, aimT = 0, lastAim = null, lastAimF = -99;
   let dartPts = [], lastDartT = 0, flightWind = 'none', flightAim = null;
+  let prevFly = [], lastFlight = null, flightT0 = 0, flightLX = null, flightLY = null;
+
+  // Every gold blob inside a rectangle of the downscaled frame, in css coords.
+  // The hand search does its own copy of this over the LEFT of the screen; this
+  // one exists for the right, where a thrown dart lives. Kept separate rather
+  // than shared because the two want different rejection rules: the hand search
+  // has to pick one blob out of a cluster on the character, this one wants all
+  // of them so motion can be matched frame to frame.
+  function goldBlobs(I, xa, xb, ya, yb, kx, ky) {
+    xa = Math.max(0, xa | 0); xb = Math.min(I.w, xb | 0);
+    ya = Math.max(0, ya | 0); yb = Math.min(I.h, yb | 0);
+    const seen = new Uint8Array(I.w * I.h), stack = [], out = [];
+    for (let y = ya; y < yb; y++) for (let x = xa; x < xb; x++) {
+      const i = y * I.w + x;
+      if (seen[i] || !isGold(...px(I, x, y))) continue;
+      stack.length = 0; stack.push(i); seen[i] = 1;
+      let n = 0, sx = 0, sy = 0;
+      while (stack.length) {
+        const q = stack.pop(), qx = q % I.w, qy = (q / I.w) | 0;
+        n++; sx += qx; sy += qy;
+        for (const nb of [q - 1, q + 1, q - I.w, q + I.w]) {
+          const nx = nb % I.w, ny = (nb / I.w) | 0;
+          if (ny < ya || ny >= yb || nx < xa || nx >= xb || seen[nb]) continue;
+          if (isGold(...px(I, nx, ny))) { seen[nb] = 1; stack.push(nb); }
+        }
+      }
+      if (n >= 4) out.push({ x: sx / n * kx, y: sy / n * ky, n });
+    }
+    return out;
+  }
 
   // Predict the flight from a launch point and angle.
   function predict(x0, y0, deg, W, H, wnd) {
@@ -500,7 +816,8 @@
     // its direction reads unreliably, and every magenta throw measured was
     // 32-99px out in the same direction. Scaling magnitude up while the
     // direction is wrong only makes it worse, so it is gated until fixed.
-    const trust = wnd.key === 'cyan' ? 1 : 0;
+    // Any detected wind is a real wind; see the config note on the colour tiers.
+    const trust = wnd.key === 'none' ? 0 : 1;
     const A = trust * cfg.windK * (wnd.mph || 6) * W;
     const wr = (wnd.deg || 0) * Math.PI / 180;
     // The wind is ONE vector, but the game does not push equally hard along
@@ -559,7 +876,7 @@
     if (!I) { stEl.textContent = readErr; probe({ frame, idle: readErr }); return; }
 
     if (wallFrac(I) < 0.35) {
-      board = null; dartPts = []; aimDeg = null;
+      board = null; dartPts = []; aimDeg = null; prevFly = [];
       if (frame % 15 === 0) stEl.textContent = 'idle\nnot in Throwy Darts';
       probe({ frame, idle: 'gated out: wall < 35%' });
       return;
@@ -568,7 +885,7 @@
     const b = findBoard(I, W, H);
     if (b) { board = b; boardT = performance.now(); }
     else if (performance.now() - boardT > 900) board = null;
-    wind = readWind(I);
+    wind = readWind(grabWind(cv));
     if (wind.key !== 'none') wind.mph = readMph(grabMph(cv));
 
     const t = performance.now();
@@ -578,8 +895,30 @@
     // gold pixel on screen. Averaging dragged the "hand" into the bottom-left
     // corner whenever the "Get 9 Bullseye in a row" trophy hint was showing,
     // because its trophy icons are gold too. The hint sits in the bottom band
-    // and the HUD in the top one, so both are cut out; of what remains the
-    // leftmost blob is the hand, since a thrown dart only ever travels right.
+    // and the HUD in the top one, so both are cut out.
+    //
+    // Which of the remaining blobs is the fletching used to be answered with
+    // "the leftmost one, since a thrown dart only ever travels right". That is
+    // wrong whenever the character is WEARING something gold. Measured on the
+    // gold helmet, in the 250x250 native box around the player: the helmet is
+    // 261 gold pixels (h 42.0, s 0.57) against the fletching's 156 (h 46.9,
+    // s 0.80), and it fragments into seven blobs because the sprite's dark
+    // outline runs between the strands. The leftmost of those sits at x=116
+    // where the fletching is at x=142, so the "hand" latched onto the helmet,
+    // findAim marched from the character's head instead of the chest, and the
+    // longest clear run from there is straight DOWN the torso and legs — which
+    // is why the predicted line dived off the bottom of the screen at
+    // aimDeg -56.8 while the dart was plainly held at about +40.
+    //
+    // Colour cannot separate them: helmets change colour with gear, so any
+    // hue or saturation window that excludes this helmet is only waiting for
+    // the next one. The separation that holds is structural — a helmet is worn
+    // on the head, the dart is held at chest height, so of the gold on the
+    // character the fletching is the LOWEST. The leftmost blob still picks the
+    // character out of the scene (a dart in flight is right of the thrower, and
+    // is what the x cut below is for); we then keep only blobs within a
+    // sprite's width of it and take the lowest of those, so a gold helmet
+    // anchors the search and no longer wins it.
     const hand = (() => {
       const y0 = Math.round(I.h * 0.14), y1 = Math.round(I.h * 0.88);
       // The thrower stays in the left half (measured 331-560px of 1326); the
@@ -587,7 +926,7 @@
       // being mistaken for the one in your hand.
       const x1 = Math.round(I.w * 0.62);
       const seen = new Uint8Array(I.w * I.h), stack = [];
-      let best = null;
+      const blobs = [];
       for (let y = y0; y < y1; y++) for (let x = 0; x < x1; x++) {
         const i = y * I.w + x;
         if (seen[i] || !isGold(...px(I, x, y))) continue;
@@ -604,8 +943,16 @@
           }
         }
         if (n < 4) continue;
-        if (!best || minx < best.minx) best = { x: sx / n * kx, y: sy / n * ky, n, minx };
+        blobs.push({ x: sx / n * kx, y: sy / n * ky, n, minx, cy: sy / n });
       }
+      if (!blobs.length) return null;
+      // The character sprite measured 55 native px wide of 960 (0.057 of the
+      // canvas). 0.08 gives room for a wide helmet either side of the body
+      // without reaching the next thing on screen.
+      const anchor = Math.min(...blobs.map(b => b.minx));
+      const near = blobs.filter(b => b.minx - anchor <= I.w * 0.08);
+      let best = null;
+      for (const b of near) if (!best || b.cy > best.cy) best = b;
       return best;
     })();
 
@@ -613,7 +960,7 @@
     let aim = null;
     if (hand) {
       const B = grabBox(cv, hand.x, hand.y, Math.max(120, W * 0.13), W, H);
-      if (B) aim = findAim(B, W, H);
+      if (B) aim = findAim(B, W, H, hand.x, hand.y);
     }
     if (aim) {
       // The sweep is smooth at roughly 3 deg per frame; anything wilder is the
@@ -659,7 +1006,97 @@
     }
 
     // ---- a dart already in the air ----
-    if (cfg.live && hand && dartPts.length) { /* hand still holds one; nothing to do */ }
+    // This used to be a stub: dartPts was declared, cleared once, and never
+    // written, so "Track thrown dart" did nothing and the probe reported
+    // dart:0 forever. It matters because the flight is the only place the
+    // model can actually be checked -- comparing predicted to observed
+    // positions measures vN and gN directly, where a landing point alone
+    // cannot separate them from landN.
+    //
+    // The corridor: left edge past the thrower, right edge short of the board,
+    // because darts already stuck in it keep their fletchings and would look
+    // like a permanent crowd of candidates. Measured on the live canvas, stuck
+    // fletchings sit at css x 1191 against a board at 1272.6, i.e. 0.061 W
+    // clear of it, so 0.08 W excludes them with room to spare. The cost is
+    // that the last stretch of flight is not seen; that is fine, the fit does
+    // not need the impact point.
+    if (cfg.live && board) {
+      const xa = 0.30 * W, xb = board.x - 0.08 * W;
+      const fly = goldBlobs(I, xa / kx, xb / kx, I.h * 0.14, I.h * 0.88, kx, ky);
+      // A dart in flight MOVES; the helmet and the stuck darts do not. Launch
+      // speed is cfg.vN*W ~ 728 css px/s on this canvas, so at rAF rates a
+      // real dart steps roughly 12px per frame. Anything that reappears within
+      // a few px of where it sat last frame is scenery.
+      const STILL = 0.004 * W;               // ~5px, below one frame of travel
+      const STEP  = 0.06 * W;                // ~80px, well over one frame
+      if (dartPts.length) {
+        const last = dartPts[dartPts.length - 1];
+        let pick = null, bd = Infinity;
+        for (const f of fly) {
+          // Forward progress is REQUIRED, not just "not backwards". There is no
+          // drag on the horizontal axis, so a real dart advances by the same
+          // amount every frame for the whole flight -- cfg.vN*W ~ 728 css px/s,
+          // which is ~12px at rAF rates and more in a 30fps replay, always well
+          // over STILL. Accepting a same-place match instead let a finished
+          // track latch onto a stationary fletching and never time out: flights
+          // of 3.2 and 3.7 seconds, and a dart reported in the air for 63% of
+          // all frames when the real duty cycle is nearer a third.
+          if (f.x < last.x + STILL) continue;
+          const d = Math.hypot(f.x - last.x, f.y - last.y);
+          if (d < bd && d <= STEP) { bd = d; pick = f; }
+        }
+        if (pick) { dartPts.push({ t, x: pick.x, y: pick.y }); lastDartT = t; }
+        else if (t - lastDartT > 250) {
+          // Flight over: hand the whole thing to the probe in one piece, with
+          // the aim and wind captured at RELEASE rather than whatever the
+          // sweep has moved on to since.
+          if (dartPts.length >= 4) {
+            lastFlight = {
+              n: dartPts.length, t0: flightT0, dur: +((lastDartT - flightT0) / 1000).toFixed(3),
+              aim: flightAim, wind: flightWind,
+              // Where predict() was told the dart starts, captured at release.
+              // Without this the launch point has to be recovered by pairing
+              // releases to flights by index, which does not survive a release
+              // that produces too short a track to publish.
+              lx: flightLX, ly: flightLY,
+              x0: +dartPts[0].x.toFixed(1), y0: +dartPts[0].y.toFixed(1),
+              pts: dartPts.map(p => ({ dt: +((p.t - flightT0) / 1000).toFixed(3),
+                                       x: +p.x.toFixed(1), y: +p.y.toFixed(1) }))
+            };
+          }
+          dartPts = [];
+        }
+      } else {
+        // No flight in progress: a dart is one that was NOT sitting there last
+        // frame. Matching against the previous frame is what separates a
+        // launch from the scenery, without needing to know where the hand is —
+        // which matters because the moment the dart leaves, the hand search
+        // has no fletching left to find and falls back to the helmet.
+        for (const f of fly) {
+          const wasThere = prevFly.some(p => Math.hypot(p.x - f.x, p.y - f.y) <= STILL);
+          if (wasThere) continue;
+          dartPts = [{ t, x: f.x, y: f.y }];
+          flightT0 = t; lastDartT = t;
+          flightAim = aimDeg !== null ? +aimDeg.toFixed(2) : null;
+          flightLX = aim ? +aim.x.toFixed(1) : (hand ? +hand.x.toFixed(1) : null);
+          flightLY = aim ? +aim.y.toFixed(1) : (hand ? +hand.y.toFixed(1) : null);
+          flightWind = { key: wind.key, deg: +(wind.deg || 0).toFixed(1), mph: wind.mph || null };
+          break;
+        }
+      }
+      prevFly = fly;
+      // Draw what was actually observed, so the checkbox does something
+      // visible and a wrong track is obvious rather than silent.
+      if (dartPts.length > 1) {
+        octx.save();
+        octx.strokeStyle = '#38bdf8'; octx.lineWidth = 2;
+        octx.shadowColor = 'rgba(0,0,0,.7)'; octx.shadowBlur = 3;
+        octx.beginPath(); octx.moveTo(dartPts[0].x, dartPts[0].y);
+        for (const p of dartPts) octx.lineTo(p.x, p.y);
+        octx.stroke();
+        octx.restore();
+      }
+    } else { prevFly = []; }
 
     if (frame % 8 === 0) {
       const w = wind.key === 'none' ? 'no wind'
@@ -672,6 +1109,20 @@
 
     probe({
       frame, board, wind, aimDeg, hand, hitBand, hitY, dart: dartPts.length,
+      // The finished flight, published once and then left in place until the
+      // next one replaces it: how long it took, where it started, the aim and
+      // wind AT RELEASE, and every observed position. This is what a residual
+      // is computed from -- predicted vs observed at matching dt -- instead of
+      // guessing the release moment backwards from a landing.
+      flight: lastFlight,
+      // How far the winning march actually got, in css px. Published because
+      // it is the value that says whether findAim followed a DART or just ran
+      // off the end of its own search: a dart is a protrusion of finite length,
+      // the character's torso is not, so a march down the body only stops when
+      // it hits the R1 ceiling. Without this in the probe there is no way to
+      // tell those two apart after the fact.
+      aimReach: aim ? +aim.reach.toFixed(1) : null,
+      aimR1: 100,
       cal: { vN: cfg.vN, gN: cfg.gN, windK: cfg.windK, landN: cfg.landN }
     });
   }
@@ -684,8 +1135,8 @@
   $('#live').onchange  = e => { cfg.live = e.target.checked; save(); };
   $('#debug').onchange = e => { cfg.debug = e.target.checked; save(); };
   $('#cal').onclick = () => {
-    cfg.vN = 0.548; cfg.gN = 0.612; cfg.landN = -0.023;
-    cfg.windK = 0.0158;
+    cfg.vN = 0.548; cfg.gN = 0.612; cfg.landN = 0;
+    cfg.windK = 0.01389;
     save();
   };
   minBtn.onclick = () => { cfg.collapsed = !cfg.collapsed; save(); sync(); };
