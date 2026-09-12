@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         IdleOn Helper Suite
 // @namespace    nativerobot
-// @version      1.42
+// @version      1.43
 // @downloadURL https://raw.githubusercontent.com/averagenative/idleon-userscripts/main/idleon-suite.user.js
 // @updateURL   https://raw.githubusercontent.com/averagenative/idleon-userscripts/main/idleon-suite.user.js
 // @description  All-in-one: autoclicker + Hoops, Fishing and Darts minigame helpers for Legends of IdleOn, each one individually switchable
@@ -1220,26 +1220,68 @@
       // one ~5s cycle that looks locally linear and correlates strongly, then fails
       // out of sample -- exactly the 43%-better-on-shotL, 3%-better-at-the-rim
       // split that was measured.
-      let platLo = Infinity, platHi = -Infinity, platHist = [];
+      // The phase is estimated AS A PHASE. The first attempt recovered cos from
+      // |sin| plus a direction-of-travel sign, which is discontinuous exactly where
+      // the platform spends most of its visible time: on a real run it flipped sign
+      // 34 times and jumped over 0.5 in cos 17 times, the worst going +0.946 to
+      // -0.955 across one frame as the platform reversed. The preview leapt between
+      // the strongest and weakest shot, which is worse than no correction. See
+      // 57faab9.
+      //
+      // The period is known exactly, so nothing has to be guessed: G16[0] gains 1.3
+      // every 20ms and phi = 1.1*G16[0] degrees, giving 71.5 deg/s and a 5.035s
+      // period. With w fixed,
+      //     platY(t) = y0 + A*sin(wt) + B*cos(wt)
+      // is linear least squares in (y0, A, B) over a window of observations, and
+      //     amp   = hypot(A, B)
+      //     cos(phi) = (A*cos(wt) - B*sin(wt)) / amp
+      // falls straight out, continuous everywhere and with no sign to choose.
+      const PLAT_W = 2 * Math.PI / 5.035;      // rad/s, from the game's own clock
+      let platHist = [];
       function platCos(H, t) {
         if (!plat) return null;
-        platHist.push({ t, y: plat.y });
-        while (platHist.length > 1 && t - platHist[0].t > 400) platHist.shift();
-        if (plat.y < platLo) platLo = plat.y;
-        if (plat.y > platHi) platHi = plat.y;
-        // The full swing is 220 of 540 on the design canvas. Until most of one has
-        // been seen the midpoint is a guess, and a wrong midpoint is worse than no
-        // correction at all.
-        if (platHi - platLo < (200 / 540) * H) return null;
-        const y0 = (platLo + platHi) / 2, amp = (platHi - platLo) / 2;
-        const sn = Math.max(-1, Math.min(1, (plat.y - y0) / amp));
-        if (platHist.length < 3) return null;
-        const dy = plat.y - platHist[0].y;
-        // Near the turning points the direction cannot be read -- but that is also
-        // where cos is near zero, so falling back to no correction there costs
-        // almost nothing. The failure is self-limiting.
-        if (Math.abs(dy) < 0.5) return null;
-        return Math.sign(dy) * Math.sqrt(Math.max(0, 1 - sn * sn));
+        platHist.push({ t: t / 1000, y: plat.y });
+        // Just over half a period. Less than that and sin and cos are too alike
+        // across the window to be told apart, which makes A and B swap freely.
+        while (platHist.length > 1 && t / 1000 - platHist[0].t > 3.0) platHist.shift();
+        const n = platHist.length;
+        if (n < 20 || t / 1000 - platHist[0].t < 2.0) return null;
+        // normal equations for y = c0 + c1*sin(wt) + c2*cos(wt)
+        let Ss = 0, Sc = 0, Sss = 0, Scc = 0, Ssc = 0, Sy = 0, Sys = 0, Syc = 0;
+        for (const q of platHist) {
+          const sn = Math.sin(PLAT_W * q.t), cs = Math.cos(PLAT_W * q.t);
+          Ss += sn; Sc += cs; Sss += sn * sn; Scc += cs * cs; Ssc += sn * cs;
+          Sy += q.y; Sys += q.y * sn; Syc += q.y * cs;
+        }
+        const M = [[n, Ss, Sc], [Ss, Sss, Ssc], [Sc, Ssc, Scc]], V = [Sy, Sys, Syc];
+        for (let i = 0; i < 3; i++) {
+          let piv = M[i][i];
+          if (Math.abs(piv) < 1e-9) return null;
+          for (let k = i + 1; k < 3; k++) {
+            const f = M[k][i] / piv;
+            for (let j = i; j < 3; j++) M[k][j] -= f * M[i][j];
+            V[k] -= f * V[i];
+          }
+        }
+        if (Math.abs(M[2][2]) < 1e-9) return null;
+        const c2 = V[2] / M[2][2];
+        const c1 = (V[1] - M[1][2] * c2) / M[1][1];
+        const c0 = (V[0] - M[0][1] * c1 - M[0][2] * c2) / M[0][0];
+        const amp = Math.hypot(c1, c2);
+        // The real swing is 110 of 540 on the design canvas. An amplitude far off
+        // that means the fit has latched onto drift or noise rather than the
+        // oscillation, and a wrong phase is worse than no correction at all.
+        const want = (110 / 540) * H;
+        if (amp < want * 0.5 || amp > want * 1.8) return null;
+        // and it has to actually describe the samples
+        let ss = 0;
+        for (const q of platHist) {
+          const pred = c0 + c1 * Math.sin(PLAT_W * q.t) + c2 * Math.cos(PLAT_W * q.t);
+          ss += (q.y - pred) * (q.y - pred);
+        }
+        if (Math.sqrt(ss / n) > amp * 0.25) return null;
+        const wt = PLAT_W * (t / 1000);
+        return Math.max(-1, Math.min(1, (c1 * Math.cos(wt) - c2 * Math.sin(wt)) / amp));
       }
       let holdT = -1e9;              // last time a ball was seen in your hands
       let flightPlat = null;         // where the platform was when this shot left
