@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         IdleOn Darts Helper
 // @namespace    nativerobot
-// @version      1.13
+// @version      1.14
 // @downloadURL https://raw.githubusercontent.com/averagenative/idleon-userscripts/main/idleon-darts.user.js
 // @updateURL   https://raw.githubusercontent.com/averagenative/idleon-userscripts/main/idleon-darts.user.js
 // @description  Draws the predicted dart path and where it lands on the board, wind included, for the Throwy Darts minigame
@@ -29,7 +29,7 @@
     band: true,        // name the band you would hit
     live: true,        // track a dart already in the air
     debug: false,
-    calVer: 5,
+    calVer: 6,
     // Confirmed v5 against 12 no-wind flights tracked at 1327.9x747, fitting
     // position against time directly rather than inferring from landings:
     // |v| median 734 px/s (sd 6) -> 0.553, and g median 454 px/s^2 (sd 16) ->
@@ -44,7 +44,21 @@
     // the clusters solves for the wind strength independently of the v/g/land
     // degeneracy, and both clusters agree: 0.0158 up, 0.0157 down. Symmetric
     // and well-determined, unlike the old 0.0135 (fit tangled with landN).
-    windK: 0.0158,     // acceleration per mph, as a fraction of canvas width
+    // v6: derived, not fitted. The minigame's flight step is
+    //     vx += windX/600 ;  vy += windY/750
+    // at Engine.STEP_SIZE = 10ms, i.e. 100 logic updates a second, on a 960x540
+    // design canvas. A per-step velocity bump of k converts to k*10000 px/s^2,
+    // so the vertical term is windY*13.333 game px/s^2, and windX/windY are the
+    // wind vector whose magnitude is exactly the displayed mph (the game takes
+    // mag = ceil(hypot(windX,windY)) for the readout). Scaling to this canvas:
+    //     windK = 13.333 / 960 = 0.01389
+    // The horizontal works out to the same number once HV=1.25 is applied,
+    // which is the 750/600 ratio and is where HV comes from in the first place.
+    //
+    // This lands on top of the empirical figure: wind acceleration measured off
+    // 104 tracked flights came to |a| ~18 px/s^2 per mph, against 13.333*W/960
+    // = 18.4 for this canvas. The old 0.0158 implied 21.0 and was ~14% high.
+    windK: 0.01389,    // acceleration per mph, as a fraction of canvas width
     // v5: ZERO, because the thing it was correcting turned out to be a bug.
     // This term only ever existed to soak up an unexplained landing residual,
     // and the residual is now explained: findAim under-read the launch angle
@@ -70,16 +84,27 @@
     // belongs to a later aim. That method cannot measure this and should not be
     // used to re-tune landN. Compare against the tracked flight instead.
     landN: 0,          // landing correction / height
-    // Magenta wind stays gated to zero in predict(): its arrow glyph is a
-    // third the size of cyan's and its direction read is unreliable — see v3
-    // history in git. Zero measures best; not a claim that magenta does nothing.
+    // v6: magenta is NO LONGER gated. The colour was never a kind of wind, it is
+    // a strength tier — the game picks the arrow sprite as
+    //     mag < 10 ? DartWind0 : mag < 18 ? DartWind1 : DartWind2
+    // so cyan is simply every wind under 10 mph and magenta is 10-17. Every
+    // cyan logged here came in at 4/6/8/9 mph and every magenta at 10/11/13,
+    // which is that boundary exactly. Gating magenta therefore threw away the
+    // STRONGEST winds, modelling a 13 mph crosswind as still air.
+    //
+    // The direction read that justified the gate was genuinely broken, but not
+    // because of magenta: it was measured through the /scale downscale and
+    // dragged by stray pixels at the window edge. Both are fixed in readWind.
+    // Measured on the sprites themselves, the unrotated arrow's principal axis
+    // sits at +1.43 deg (DartWind0) and +2.13 deg (DartWind1) — the two glyphs
+    // agree to under a degree, so there is no per-colour correction to make.
     collapsed: false,
     hidden: false,
     px: null, py: null // dragged panel position, viewport px
   }, JSON.parse(localStorage.getItem(KEY) || '{}'));
-  if (cfg.calVer !== 5) {
-    cfg.calVer = 5; cfg.vN = 0.548; cfg.gN = 0.612; cfg.landN = 0;
-    cfg.windK = 0.0158;
+  if (cfg.calVer !== 6) {
+    cfg.calVer = 6; cfg.vN = 0.548; cfg.gN = 0.612; cfg.landN = 0;
+    cfg.windK = 0.01389;
   }
   let saveAt = 0;
   const save = () => localStorage.setItem(KEY, JSON.stringify(cfg));
@@ -621,7 +646,18 @@
     // measurement off the recording spread to 82-100, and normalised by canvas
     // width the two disagreed by 10%. A reach window wide enough for both lets
     // the dives back in, so it is deliberately not used here.
-    const SWEEP_LO = -40;
+    // -50, not -40. The game sweeps the arm as
+    //     arm = -20 + (38 + 15t/(t+30)) * Trigg(sin, ...)
+    // and launches at vy = speed*sin(arm) with screen y DOWN, so this file's
+    // angle is -arm. The amplitude grows from 38 to 53 over a run, which puts
+    // the true aim range at -33 .. +73 deg here. AIM_BIAS is added after the
+    // scan, so a genuine -33 reaches the boundary test as about -37.2 raw — and
+    // the old -40 floor rejected anything at or under -35, clipping the bottom
+    // of a legitimate sweep. Observed readings only reached -28, so this had not
+    // bitten yet, but it would have on a long run at full amplitude. -50 leaves
+    // the rejection band at -45, clear of -37.2, and still catches a march that
+    // ran out of range since those pin within ~4.2 deg of the floor.
+    const SWEEP_LO = -50;
     for (let deg = SWEEP_LO; deg <= 80; deg++) {
       const th = deg * Math.PI / 180, ux = Math.cos(th), uy = -Math.sin(th);
       let reach = R0, gap = 0;
@@ -780,7 +816,8 @@
     // its direction reads unreliably, and every magenta throw measured was
     // 32-99px out in the same direction. Scaling magnitude up while the
     // direction is wrong only makes it worse, so it is gated until fixed.
-    const trust = wnd.key === 'cyan' ? 1 : 0;
+    // Any detected wind is a real wind; see the config note on the colour tiers.
+    const trust = wnd.key === 'none' ? 0 : 1;
     const A = trust * cfg.windK * (wnd.mph || 6) * W;
     const wr = (wnd.deg || 0) * Math.PI / 180;
     // The wind is ONE vector, but the game does not push equally hard along
@@ -1099,7 +1136,7 @@
   $('#debug').onchange = e => { cfg.debug = e.target.checked; save(); };
   $('#cal').onclick = () => {
     cfg.vN = 0.548; cfg.gN = 0.612; cfg.landN = 0;
-    cfg.windK = 0.0158;
+    cfg.windK = 0.01389;
     save();
   };
   minBtn.onclick = () => { cfg.collapsed = !cfg.collapsed; save(); sync(); };
