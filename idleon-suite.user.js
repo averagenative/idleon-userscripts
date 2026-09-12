@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         IdleOn Helper Suite
 // @namespace    nativerobot
-// @version      1.30
+// @version      1.32
 // @downloadURL https://raw.githubusercontent.com/averagenative/idleon-userscripts/main/idleon-suite.user.js
 // @updateURL   https://raw.githubusercontent.com/averagenative/idleon-userscripts/main/idleon-suite.user.js
 // @description  All-in-one: autoclicker + Hoops, Fishing and Darts minigame helpers for Legends of IdleOn, each one individually switchable
@@ -585,7 +585,7 @@
         debug: false,      // outline every detected blob
         // Calibration is stored as fractions of canvas size so it survives resizing
         // the window — the game scales its physics with the viewport.
-        calVer: 6,         // bump to throw away calibration learned by an older build
+        calVer: 7,         // bump to throw away calibration learned by an older build
         // The shot is a fixed parabola anchored to the PLATFORM, not to the ball in
         // your hands. Written as y = platY + A*(u - uL)*(u - R) where u is distance
         // right of the platform centre: A is curvature, uL and R are where the path
@@ -616,10 +616,17 @@
         // own spread across shots is a quarter of its value. Treat a disagreement
         // there as unsettled rather than as this seed being right.
         //
-        // KNOWN, UNEXPLAINED, and the biggest error left. These two are supposed to
-        // describe the SHOT, so anchoring to the platform should make them
-        // invariant to where the platform happens to be. They are not. Across two
-        // independent runs read off the live game:
+        // EXPLAINED as of v7, and no longer the biggest error left -- see platCos()
+        // in the state section. Platform height and release velocity are the same
+        // oscillator in quadrature (platY = 335 + 110*sin(phi), vy = -2.9 +
+        // 0.7*cos(phi), identical argument), so the coupling below is real but is
+        // neither linear nor even single-valued: one height means two shots, one
+        // rising and one falling. The correction now comes from the oscillator
+        // instead of from these constants, which stay as the cos(phi)=0 case.
+        //
+        // The measurements that led here, kept because they are what a linear
+        // reading of a quadrature coupling looks like. Across two independent runs
+        // read off the live game:
         //
         //             corr(platY, shotL)   corr(platY, shotR)
         //   8 flights        -0.79               +0.71
@@ -712,7 +719,16 @@
         // platform-relative, the arc meets platform height further out when the
         // platform sits lower, which is the observed sign. Settling it needs the
         // release instant, which nothing currently measures.
-        shotA: 2.233,      // curvature x canvas width
+        // v7: the seed is now derived rather than fitted. Curvature is g/2vx^2 with
+        // g = 0.069 and vx = 3.9 per 10ms step, which on the 960-wide design canvas
+        // is 0.069/(2*3.9^2)*960 = 2.177. The old 2.233 came off 13 tracked flights
+        // (sd 0.034, range 2.195..2.288) and sits just outside that, i.e. it is a
+        // systematic 2.6% rather than noise -- the same direction and size as the
+        // tracking bias found in the darts helper, where following a blob centroid
+        // through a rotating sprite inflated fitted accelerations. Self-calibration
+        // still runs and will pull toward whatever the tracker sees; this only
+        // changes where a fresh install starts.
+        shotA: 2.177,      // curvature x canvas width
         shotL: -0.119,     // upward crossing, fraction of width left of the platform
         shotR: 0.547,      // landing range, fraction of width right of the platform
         calSeeded: true,
@@ -723,9 +739,9 @@
       // live flights the committed curvature ranged 1.865-2.941 around a true
       // 2.23 — a live config caught mid-session held 2.486. That is not stale, it
       // is contaminated, and averaging more shots into it does not wash it out.
-      if (cfg.calVer !== 6) {
-        cfg.calVer = 6; cfg.calSeeded = true;
-        cfg.shotA = 2.233; cfg.shotL = -0.119; cfg.shotR = 0.547;
+      if (cfg.calVer !== 7) {
+        cfg.calVer = 7; cfg.calSeeded = true;
+        cfg.shotA = 2.177; cfg.shotL = -0.119; cfg.shotR = 0.547;
       }
       delete cfg.grav; delete cfg.launch; delete cfg.launchN; delete cfg.gravN;
   });
@@ -1044,8 +1060,50 @@
 
       // ---------- state ----------
       let plat = null, platT = 0;    // the platform, re-found every frame
+
+      // ---- the platform IS the shot ----
+      // The game sets platY = 335 + 110*Trigg('sin', 0, 1.1) and releases at
+      // vy = -2.9 + 0.7*Trigg('cos', 0, 1.1). Trigg takes the SAME argument for
+      // both, so where the platform is and how hard the ball is thrown are one
+      // oscillator in quadrature: sin says where it is, cos says how fast the shot
+      // leaves. sin comes from the platform's height, cos from which way it is
+      // travelling.
+      //
+      // This is what the note on shotL/shotR above could not explain. Platform
+      // height really is coupled to the shot, which is why the correlations were
+      // -0.79 and +0.71 -- but a given height maps to TWO different shots, one on
+      // the way up and one on the way down, and nothing linear in height can tell
+      // them apart. Worse, the relationship is not even monotonic: the shot is at
+      // its EXTREMES when the platform is at mid height and average when the
+      // platform is at the top or bottom of its travel. Over 8 and 5 flights inside
+      // one ~5s cycle that looks locally linear and correlates strongly, then fails
+      // out of sample -- exactly the 43%-better-on-shotL, 3%-better-at-the-rim
+      // split that was measured.
+      let platLo = Infinity, platHi = -Infinity, platHist = [];
+      function platCos(H, t) {
+        if (!plat) return null;
+        platHist.push({ t, y: plat.y });
+        while (platHist.length > 1 && t - platHist[0].t > 400) platHist.shift();
+        if (plat.y < platLo) platLo = plat.y;
+        if (plat.y > platHi) platHi = plat.y;
+        // The full swing is 220 of 540 on the design canvas. Until most of one has
+        // been seen the midpoint is a guess, and a wrong midpoint is worse than no
+        // correction at all.
+        if (platHi - platLo < (200 / 540) * H) return null;
+        const y0 = (platLo + platHi) / 2, amp = (platHi - platLo) / 2;
+        const sn = Math.max(-1, Math.min(1, (plat.y - y0) / amp));
+        if (platHist.length < 3) return null;
+        const dy = plat.y - platHist[0].y;
+        // Near the turning points the direction cannot be read -- but that is also
+        // where cos is near zero, so falling back to no correction there costs
+        // almost nothing. The failure is self-limiting.
+        if (Math.abs(dy) < 0.5) return null;
+        return Math.sign(dy) * Math.sqrt(Math.max(0, 1 - sn * sn));
+      }
       let holdT = -1e9;              // last time a ball was seen in your hands
       let flightPlat = null;         // where the platform was when this shot left
+      let flightCos = null;          // and the quadrature term it left on
+      let lastFit = null;            // the finished shot's own fit, for the probe
       let calSamples = [], flyT = 0; // per-flight calibration fits, awaiting commit
 
       // Calibration used to be folded in on every frame of a flight. With a 0.25
@@ -1063,6 +1121,11 @@
           return v[v.length >> 1];
         };
         const An = med('A'), Ln = med('L'), Rn = med('R');
+        // Publish this shot's own fit next to the quadrature term it was thrown on.
+        // If the oscillator really sets the release velocity, R must track cos --
+        // that is the claim, and it is testable against any recording.
+        lastFit = { A: +An.toFixed(4), L: +Ln.toFixed(4), R: +Rn.toFixed(4),
+                    cos: flightCos == null ? null : +flightCos.toFixed(3), n: s.length };
         const w = cfg.calSeeded ? 1 : 0.3;       // first real shot replaces the seed
         cfg.shotA += (An - cfg.shotA) * w;
         cfg.shotL += (Ln - cfg.shotL) * w;
@@ -1073,8 +1136,30 @@
 
       // The shot as a curve in screen space, anchored to the platform. Time never
       // enters it, so it does not depend on when the ball was first spotted.
-      function shotCurve(px, py, dir, W) {
-        const A = cfg.shotA / W, uL = cfg.shotL * W, uR = cfg.shotR * W;
+      // Release x offset, 17 of 960 on the design canvas: the ball leaves the hand
+      // at (px+17, py-97), and only the x part is needed here because the curve is
+      // already anchored in y to the platform.
+      const RELX = 17 / 960;
+      function shotCurve(px, py, dir, W, cosPhi) {
+        const A = cfg.shotA / W;
+        let uL = cfg.shotL * W, uR = cfg.shotR * W;
+        if (cosPhi != null) {
+          // Re-cut the parabola for the vy this particular throw will actually get.
+          // Curvature is g/2vx^2 and cannot move -- neither g nor vx depends on the
+          // oscillator -- so the only thing that changes is the launch slope, by
+          // d(vy/vx) = 0.7*cos/3.9. The release point is left exactly where the
+          // shipped constants put it, which means cosPhi 0 reproduces the old curve
+          // to the pixel and this can only add the variation that was missing.
+          const ur = RELX * W;
+          const yr = A * (ur - uL) * (ur - uR);
+          const m = A * (2 * ur - uL - uR) + (0.7 * cosPhi) / 3.9;
+          const disc = m * m - 4 * A * yr;
+          if (disc > 0) {
+            const r = Math.sqrt(disc);
+            uL = ur + (-m - r) / (2 * A);
+            uR = ur + (-m + r) / (2 * A);
+          }
+        }
         return { at: x => { const u = (x - px) * dir; return py + A * (u - uL) * (u - uR); },
                  A, uL, uR, px, py, dir };
       }
@@ -1280,6 +1365,7 @@
         const pl = findPlatform(img.d, img.sw, img.sh, k, W);
         if (pl) { plat = pl; platT = t; }
         else if (t - platT > 700) plat = null;
+        const cosPhi = platCos(H, t);
 
         if (cfg.debug) {
           octx.lineWidth = 1;
@@ -1331,13 +1417,14 @@
           // Where the platform was as this shot left — the frame of reference the
           // whole shot model is expressed in.
           flightPlat = plat ? { x: plat.x, y: plat.y } : null;
+          if (flightCos === null) flightCos = cosPhi;
           calSamples = [];
         }
         if (fly) flyT = t;
         // Tracking drops the ball for a frame or two mid-flight, so the shot is
         // only called over once it has stayed gone.
         else if (t - flyT < 400) { /* still the same shot */ }
-        else { flightPlat = null; if (calSamples.length) commitCal(); }
+        else { flightPlat = null; if (calSamples.length) commitCal(); flightCos = null; }
 
         // ---- live arc for a ball in the air ----
         let made = null;
@@ -1428,7 +1515,7 @@
         // exactly when you need it to line up the next shot.
         if (cfg.ghost && plat && ready) {
           const dir = lastRim ? Math.sign(lastRim.x - plat.x) || 1 : 1;
-          const curve = shotCurve(plat.x, plat.y, dir, W);
+          const curve = shotCurve(plat.x, plat.y, dir, W, cosPhi);
           // Start the line directly above the platform rather than at the curve's
           // left crossing: that crossing is ~0.18 of a screen to the left, which
           // ran off the edge and made the arc appear to fly in from nowhere.
@@ -1467,7 +1554,12 @@
         probe({
           frame, plat, rim: lastRim, rimWhy, blobs: cands.length, tracks: tracks.length,
           flying, made, ready, ghostMade,
-          cal: { a: cfg.shotA, l: cfg.shotL, r: cfg.shotR, seeded: cfg.calSeeded }
+          cal: { a: cfg.shotA, l: cfg.shotL, r: cfg.shotR, seeded: cfg.calSeeded },
+          // null until most of one platform swing has been seen; then the
+          // quadrature term that sets how hard this particular shot leaves
+          cosPhi: cosPhi == null ? null : +cosPhi.toFixed(3),
+          platY: plat ? +plat.y.toFixed(1) : null,
+          fit: lastFit
         });
       }
       // ---------- wiring ----------
