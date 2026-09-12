@@ -9,6 +9,7 @@
     z: 2147483647,
     theme: { dot: '#a78bfa', ac: '#7c3aed' },
     slot: { top: 12, left: 12, width: 196, nub: 6 },
+    dockOrder: 0,
     overlay: false,
     bodyHTML:
       // Each row: the helper's name, its toggle hotkey, an eye that shows or
@@ -23,6 +24,14 @@
         `<input id="en-${m.id}" type="checkbox"></span></div>`
       ).join('\n        ') + `
         <hr>
+        <div class="row"><label>Layout</label><span class="seg">
+          <button id="lay-free" data-l="free">Free</button>
+          <button id="lay-left" data-l="left">Left</button>
+          <button id="lay-top" data-l="top">Top</button></span></div>
+        <div class="row"><label>One helper at a time</label><input id="solo" type="checkbox"></div>
+        <div class="row"><label>Auto-open active</label><input id="follow" type="checkbox"></div>
+        <hr>
+        <button class="btn sm" id="rollup">Minimise all</button>
         <button class="btn sm" id="panels">Hide all panels</button>
         <button class="btn sm" id="reset">Reset panel layout</button>
         <div class="hint">unticking a helper stops it:<br>no panel, no readback, no hotkey</div>`
@@ -36,6 +45,7 @@
     // "all hidden" drives the button's label, so it reads as the thing it is
     // about to do rather than as the state it is in.
     const anyShown = () => MODULES.some(m => live.has(m.id) && !m.cfg.hidden);
+    const anyOpen  = () => MODULES.some(m => live.has(m.id) && !m.cfg.collapsed);
 
     function syncHub() {
       for (const m of MODULES) {
@@ -46,6 +56,13 @@
         eye.className = 'eye' + (off ? ' off' : '');
       }
       hub.$('#panels').textContent = anyShown() ? 'Hide all panels' : 'Show all panels';
+      hub.$('#rollup').textContent = anyOpen() ? 'Minimise all' : 'Expand all';
+      for (const l of ['free', 'left', 'top'])
+        hub.$('#lay-' + l).classList.toggle('sel', suite.layout === l);
+      hub.$('#solo').checked = !!suite.solo;
+      hub.$('#follow').checked = !!suite.follow;
+      // Both only bite in a dock; saying so beats leaving them looking broken.
+      hub.$('#solo').disabled = hub.$('#follow').disabled = suite.layout === 'free';
       hub.chrome();
     }
 
@@ -58,6 +75,26 @@
         syncHub();
       };
     }
+    for (const l of ['free', 'left', 'top'])
+      hub.$('#lay-' + l).onclick = () => { suite.layout = l; saveSuite(); syncLayout(); };
+    hub.$('#solo').onchange = e => { suite.solo = e.target.checked; saveSuite(); };
+    hub.$('#follow').onchange = e => { suite.follow = e.target.checked; saveSuite(); };
+    onLayoutChange = syncHub;
+
+    // Rolls every helper up to its title bar without hiding it — the panels
+    // stay on screen and stay clickable, which is the difference from "Hide
+    // all panels". In a dock that is also how you get back to one short column
+    // after several have been opened.
+    hub.$('#rollup').onclick = () => {
+      const roll = anyOpen();
+      for (const m of MODULES) {
+        m.cfg.collapsed = roll; m.save();
+        const inst = live.get(m.id);
+        if (inst) inst.ui.chrome();
+      }
+      syncHub();
+    };
+
     hub.$('#panels').onclick = () => {
       const hide = anyShown();
       for (const m of MODULES) {
@@ -78,13 +115,47 @@
         else { m.cfg.px = null; m.cfg.py = null; m.cfg.hidden = false; m.cfg.collapsed = false; m.save(); }
       }
       hub.reset();
+      suite.layout = 'free'; saveSuite();
+      syncLayout();
       syncHub();
     };
+
+    // Opt-in: the helper whose minigame is on screen opens itself and the other
+    // helpers close. Driven off each helper's own detection -- the variable it
+    // already keeps for "I can see my minigame" -- so there is no second copy
+    // of any detector here to drift out of step.
+    //
+    // Only acts on a CHANGE of which helper is active, so a manual collapse is
+    // not immediately undone; and it does nothing until a helper has been
+    // active for a moment, because the detectors flicker while a screen loads
+    // and a layout that flickers with them is worse than one that lags.
+    let followWas = null, followSince = 0, followCand = null;
+    function followTick() {
+      if (!suite.follow || suite.layout === 'free') { followWas = null; return; }
+      let now = null;
+      for (const m of MODULES) {
+        const inst = live.get(m.id);
+        if (m.helper && inst && inst.active && inst.active()) { now = m.id; break; }
+      }
+      const t = performance.now();
+      if (now !== followCand) { followCand = now; followSince = t; return; }
+      if (t - followSince < 600 || now === followWas) return;
+      followWas = now;
+      for (const m of MODULES) {
+        if (!m.helper) continue;
+        const inst = live.get(m.id);
+        if (!inst) continue;
+        const want = m.id === now;
+        if (m.cfg.collapsed !== !want) { m.cfg.collapsed = !want; m.save(); inst.ui.chrome(); }
+      }
+    }
 
     for (const m of MODULES) if (suite.enabled[m.id]) startModule(m);
 
     hub.settle();
     syncHub();
+    syncLayout();
+    setInterval(followTick, 250);
     requestAnimationFrame(driver);
   }
 

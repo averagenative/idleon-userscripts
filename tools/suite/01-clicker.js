@@ -15,6 +15,7 @@
     z: 2147483646,
     theme: { dot: '#4ade80', ac: '#2563eb', stop: '#dc2626' },
     slot: { top: 12, right: 12, width: 210, nub: 24 },
+    dockOrder: 1,
     overlay: false,
     hotkeys: { F8: 'toggle', F9: 'panic', F10: 'hide' },
     keyHint: 'F8',
@@ -38,13 +39,23 @@
             xyEl = $('#xy'), setBtn = $('#set');
 
       let on = false, timer = null, capturing = false;
-      let lastX = 0, lastY = 0;
-      ui.on(document, 'mousemove', e => { lastX = e.clientX; lastY = e.clientY; }, true);
+      // lastX/lastY only move while the pointer is over THIS window, so in a
+      // second window they go stale on the way out and are 0,0 before it has
+      // ever arrived. See the standalone clicker for the whole story; ptrIn is
+      // what says whether the coordinates mean anything.
+      let lastX = 0, lastY = 0, ptrIn = false, wasBlind = false;
+      ui.on(document, 'mousemove', e => {
+        lastX = e.clientX; lastY = e.clientY; ptrIn = true;
+      }, true);
+      // A null relatedTarget is the pointer leaving the document altogether;
+      // leaving for a panel names that element instead and does not count.
+      ui.on(document, 'mouseout', e => { if (!e.relatedTarget) ptrIn = false; }, true);
 
       function sync() {
         ivMinEl.value = cfg.ivMin; ivMaxEl.value = cfg.ivMax; jpEl.value = cfg.jitterPx;
         root.querySelectorAll('.seg button').forEach(b => b.classList.toggle('sel', b.dataset.m === cfg.mode));
-        xyEl.textContent = cfg.mode !== 'fixed' ? '(follows cursor)'
+        xyEl.textContent = cfg.mode !== 'fixed'
+          ? (ptrIn ? '(follows cursor)' : 'cursor is in another window')
           : hasTarget() ? fixedPoint().map(Math.round).join(', ') : 'not set';
         dot.classList.toggle('on', on);
         runBtn.textContent = on ? 'Stop  (F8)' : 'Start  (F8)';

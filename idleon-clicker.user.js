@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         IdleOn Clicker
 // @namespace    nativerobot
-// @version      3.5
+// @version      3.6
 // @downloadURL https://raw.githubusercontent.com/averagenative/idleon-userscripts/main/idleon-clicker.user.js
 // @updateURL   https://raw.githubusercontent.com/averagenative/idleon-userscripts/main/idleon-clicker.user.js
 // @description  Stealthy in-page autoclicker panel for Legends of IdleOn (browser)
@@ -36,8 +36,23 @@
 
   // ---------- state ----------
   let on = false, timer = null, capturing = false;
-  let lastX = 0, lastY = 0;
-  document.addEventListener('mousemove', e => { lastX = e.clientX; lastY = e.clientY; }, true);
+  // lastX/lastY only move while the pointer is over THIS window. In a second
+  // window — side by side, or simply not the one being pointed at — they go
+  // stale the moment it leaves, and they are 0,0 before it has ever arrived.
+  // Cursor mode would then click the top-left corner of the game forever,
+  // silently, which is not a harmless no-op: a click on bare ground is a walk
+  // command, so the character strolls off. ptrIn is what says whether the
+  // coordinates mean anything.
+  let lastX = 0, lastY = 0, ptrIn = false, wasBlind = false;
+  document.addEventListener('mousemove', e => {
+    lastX = e.clientX; lastY = e.clientY; ptrIn = true;
+  }, true);
+  // mouseout with a null relatedTarget is the pointer leaving the document
+  // altogether; leaving for the panel, or for any other element, names that
+  // element instead and does not count.
+  document.addEventListener('mouseout', e => {
+    if (!e.relatedTarget) ptrIn = false;
+  }, true);
 
   // ---------- stealth UI host (closed shadow DOM, hidden from page JS) ----------
   const host = document.createElement('div');
@@ -120,7 +135,8 @@
   function sync() {
     ivMinEl.value = cfg.ivMin; ivMaxEl.value = cfg.ivMax; jpEl.value = cfg.jitterPx;
     root.querySelectorAll('.seg button').forEach(b => b.classList.toggle('sel', b.dataset.m === cfg.mode));
-    xyEl.textContent = cfg.mode !== 'fixed' ? '(follows cursor)'
+    xyEl.textContent = cfg.mode !== 'fixed'
+      ? (ptrIn ? '(follows cursor)' : 'cursor is in another window')
       : hasTarget() ? fixedPoint().map(Math.round).join(', ') : 'not set';
     dot.classList.toggle('on', on);
     runBtn.textContent = on ? 'Stop  (F8)' : 'Start  (F8)';
@@ -175,8 +191,15 @@
 
   function tick() {
     if (!on) return;
+    // Cursor mode with the pointer in another window has nothing to aim at, so
+    // it holds rather than clicking a stale coordinate. The timer keeps running
+    // and it resumes by itself when the pointer comes back. Announced, because
+    // the failure is otherwise invisible: the clicker looks like it is running
+    // and the game just never responds.
+    const blind = cfg.mode !== 'fixed' && !ptrIn;
+    if (blind !== wasBlind) { wasBlind = blind; sync(); }
     // Resolved every tick: the canvas rect can change under a running clicker.
-    if (cfg.mode !== 'fixed' || hasTarget()) {
+    if (!blind && (cfg.mode !== 'fixed' || hasTarget())) {
       const [tx, ty] = cfg.mode === 'fixed' ? fixedPoint() : [lastX, lastY];
       clickAt(tx, ty);
     }
