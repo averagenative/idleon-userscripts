@@ -156,16 +156,37 @@
     // ?? not ||: the hub is dockOrder 0, which || would treat as missing and
     // sort to the bottom of its own dock.
     const list = docks.slice().sort((a, b) => (a.def.dockOrder ?? 99) - (b.def.dockOrder ?? 99));
-    let x = DOCK_EDGE, y = DOCK_EDGE;
+    // A run wraps rather than running off the edge. Five panels do not fit
+    // across a half-width window, and with several expanded they do not fit
+    // down a short one either — and a panel past the edge is the exact trap the
+    // clamping in place() exists to avoid: unreachable, and unreachable means
+    // undraggable, so there is no way back to it.
+    //
+    // `run` is the thickness of the current row (or column): the tallest panel
+    // in a row, the widest in a column, which is what the next one has to clear.
+    // The first panel of a run never wraps — if one panel is bigger than the
+    // whole viewport there is nowhere better for it, and wrapping on it would
+    // spin.
+    let x = DOCK_EDGE, y = DOCK_EDGE, run = 0;
     for (const { ui } of list) {
       if (ui.cfg.hidden) continue;          // hidden panels are a nub, not a slot
       const p = ui.panel;
       p.style.right = 'auto';
+      // Measured before placing: the width is pinned by style.width so the
+      // height does not depend on where it ends up, and the wrap has to be
+      // decided before the position is written.
+      const r = p.getBoundingClientRect();
+      if (vert) {
+        if (y > DOCK_EDGE && y + r.height > window.innerHeight - DOCK_EDGE) {
+          x += run + DOCK_GAP; y = DOCK_EDGE; run = 0;
+        }
+      } else if (x > DOCK_EDGE && x + r.width > window.innerWidth - DOCK_EDGE) {
+        y += run + DOCK_GAP; x = DOCK_EDGE; run = 0;
+      }
       p.style.left = x + 'px';
       p.style.top = y + 'px';
-      const r = p.getBoundingClientRect();
-      if (vert) y += r.height + DOCK_GAP;
-      else x += r.width + DOCK_GAP;
+      if (vert) { y += r.height + DOCK_GAP; run = Math.max(run, r.width); }
+      else      { x += r.width + DOCK_GAP;  run = Math.max(run, r.height); }
     }
   }
 
