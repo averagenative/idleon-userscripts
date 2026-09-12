@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         IdleOn Hoops Helper
 // @namespace    nativerobot
-// @version      1.11
+// @version      1.12
 // @downloadURL https://raw.githubusercontent.com/averagenative/idleon-userscripts/main/idleon-hoops.user.js
 // @updateURL   https://raw.githubusercontent.com/averagenative/idleon-userscripts/main/idleon-hoops.user.js
 // @description  Dotted-line shot preview + live ball arc for the Swishy Hoops minigame in Legends of IdleOn
@@ -1090,7 +1090,20 @@
     // exactly when you need it to line up the next shot.
     if (cfg.ghost && plat && ready) {
       const dir = lastRim ? Math.sign(lastRim.x - plat.x) || 1 : 1;
-      const curve = shotCurve(plat.x, plat.y, dir, W, cosPhi);
+      // DISABLED pending a correct phase estimate -- see platCos(). Deriving
+      // cos from |sin| plus a direction-of-travel sign makes the arc JUMP at
+      // every turning point: measured on a real run, 34 sign flips and 17
+      // jumps of over 0.5 in cos, the worst going +0.946 -> -0.955 between two
+      // frames. That is the preview leaping between the strongest and weakest
+      // shot, which is worse than no correction at all.
+      //
+      // The reasoning that said this was safe -- "near the turning points cos
+      // is near zero, so a wrong sign costs little" -- was wrong. It holds only
+      // if y0 and amp are right, and they are not: taken from observed min/max
+      // they are outlier-sensitive, and the detector picks different rows of
+      // the platform as it slides. At the observed reversal sin was 0.288, so
+      // |cos| was 0.957 and the flip cost everything.
+      const curve = shotCurve(plat.x, plat.y, dir, W, null);
       // Start the line directly above the platform rather than at the curve's
       // left crossing: that crossing is ~0.18 of a screen to the left, which
       // ran off the edge and made the arc appear to fly in from nowhere.
