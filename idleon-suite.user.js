@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         IdleOn Helper Suite
 // @namespace    nativerobot
-// @version      1.37
+// @version      1.41
 // @downloadURL https://raw.githubusercontent.com/averagenative/idleon-userscripts/main/idleon-suite.user.js
 // @updateURL   https://raw.githubusercontent.com/averagenative/idleon-userscripts/main/idleon-suite.user.js
 // @description  All-in-one: autoclicker + Hoops, Fishing and Darts minigame helpers for Legends of IdleOn, each one individually switchable
@@ -156,37 +156,47 @@
     // ?? not ||: the hub is dockOrder 0, which || would treat as missing and
     // sort to the bottom of its own dock.
     const list = docks.slice().sort((a, b) => (a.def.dockOrder ?? 99) - (b.def.dockOrder ?? 99));
-    // A run wraps rather than running off the edge. Five panels do not fit
-    // across a half-width window, and with several expanded they do not fit
-    // down a short one either — and a panel past the edge is the exact trap the
-    // clamping in place() exists to avoid: unreachable, and unreachable means
-    // undraggable, so there is no way back to it.
+    // Packed into lanes, not shelved into rows. Shelving — starting every
+    // wrapped panel below the TALLEST one before it — leaves a hole: expanding
+    // the clicker pushed a collapsed Darts panel most of a screen down, past
+    // the empty space under the Suite panel where it plainly belonged.
     //
-    // `run` is the thickness of the current row (or column): the tallest panel
-    // in a row, the widest in a column, which is what the next one has to clear.
-    // The first panel of a run never wraps — if one panel is bigger than the
-    // whole viewport there is nowhere better for it, and wrapping on it would
-    // spin.
-    let x = DOCK_EDGE, y = DOCK_EDGE, run = 0;
+    // So panels run along the dock's edge until the viewport is used up, and
+    // that fixes a set of lanes: columns for a top dock, rows for a left one.
+    // Everything after goes into whichever lane is currently SHALLOWEST, so a
+    // short panel fills the gap beside a short neighbour instead of clearing
+    // the tall one. Lanes are disjoint along the edge, so nothing can overlap
+    // however the depths fall.
+    const lim  = vert ? window.innerHeight - DOCK_EDGE : window.innerWidth - DOCK_EDGE;
+    const lanes = [];            // { pos, size, edge } along / across / depth used
+    let cursor = DOCK_EDGE;
     for (const { ui } of list) {
-      if (ui.cfg.hidden) continue;          // hidden panels are a nub, not a slot
+      if (ui.cfg.hidden) continue;        // hidden panels are a nub, not a slot
       const p = ui.panel;
       p.style.right = 'auto';
-      // Measured before placing: the width is pinned by style.width so the
-      // height does not depend on where it ends up, and the wrap has to be
-      // decided before the position is written.
+      // Measured before placing: style.width pins the width, so the height does
+      // not depend on where it lands, and the lane has to be chosen first.
       const r = p.getBoundingClientRect();
-      if (vert) {
-        if (y > DOCK_EDGE && y + r.height > window.innerHeight - DOCK_EDGE) {
-          x += run + DOCK_GAP; y = DOCK_EDGE; run = 0;
-        }
-      } else if (x > DOCK_EDGE && x + r.width > window.innerWidth - DOCK_EDGE) {
-        y += run + DOCK_GAP; x = DOCK_EDGE; run = 0;
+      const along = vert ? r.height : r.width;    // extent along the dock edge
+      const deep  = vert ? r.width  : r.height;   // extent away from it
+      let lane;
+      if (cursor + along <= lim || !lanes.length) {
+        // Room for another lane — or this is the first panel, which opens one
+        // even if it is bigger than the viewport, because there is nowhere else.
+        lane = { pos: cursor, size: along, edge: DOCK_EDGE };
+        lanes.push(lane);
+        cursor += along + DOCK_GAP;
+      } else {
+        // Prefer the shallowest lane this actually FITS in; panels differ by up
+        // to ~30px and one placed in a narrower lane would hang over its
+        // neighbour. Fall back to the shallowest overall if none is wide enough.
+        const fits = lanes.filter(l => l.size >= along);
+        const pool = fits.length ? fits : lanes;
+        lane = pool.reduce((m, l) => (l.edge < m.edge ? l : m), pool[0]);
       }
-      p.style.left = x + 'px';
-      p.style.top = y + 'px';
-      if (vert) { y += r.height + DOCK_GAP; run = Math.max(run, r.width); }
-      else      { x += r.width + DOCK_GAP;  run = Math.max(run, r.height); }
+      p.style.left = (vert ? lane.edge : lane.pos) + 'px';
+      p.style.top  = (vert ? lane.pos  : lane.edge) + 'px';
+      lane.edge += deep + DOCK_GAP;
     }
   }
 
@@ -2841,10 +2851,11 @@
         // belongs to a later aim. That method cannot measure this and should not be
         // used to re-tune landN. Compare against the tracked flight instead.
         landN: 0,          // landing correction / height
-        // v6: magenta is NO LONGER gated. The colour was never a kind of wind, it is
-        // a strength tier — the game picks the arrow sprite as
+        // v6: magenta is NO LONGER gated, and v7 added red. The colour was never a
+        // kind of wind, it is a strength tier — the game picks the arrow sprite as
         //     mag < 10 ? DartWind0 : mag < 18 ? DartWind1 : DartWind2
-        // so cyan is simply every wind under 10 mph and magenta is 10-17. Every
+        // so cyan is every wind under 10 mph, magenta 10-17, red 18 and up. Red was
+        // not matched at all until v7 and read as 'none'; see windPx. Every
         // cyan logged here came in at 4/6/8/9 mph and every magenta at 10/11/13,
         // which is that boundary exactly. Gating magenta therefore threw away the
         // STRONGEST winds, modelling a 13 mph crosswind as still air.
@@ -3099,15 +3110,62 @@
       // Do not "calibrate" windK against this until the offset is anchored.
       // S is the native-resolution crop from grabWind, so the whole image IS the
       // window -- no sub-window arithmetic here any more.
+      // The three arrow sprites, and the one that used to be invisible.
+      //
+      //   DartWind0  cyan     hue 185-209   v .91-1.00   under 10 mph
+      //   DartWind1  magenta  hue 275-293   v 1.00       10-17 mph
+      //   DartWind2  red      hue   3- 36   v 1.00       18 mph and up
+      //
+      // Only the first two were ever matched, so an 18+ mph wind read as 'none' and
+      // was modelled as still air -- the strongest winds in the game, treated as no
+      // wind at all. Exactly the same shape of bug as the magenta gate.
+      //
+      // Red needs care the other two do not. It shares the HUD's own colours: the
+      // brown panel behind it is hue 0-32 saturation .30-.75, and the amber text and
+      // trim beside it run hue 33-44 -- so the arrow overlaps its background in BOTH
+      // hue and saturation. Hue cannot separate them at all: the arrow's hue is
+      // quantised, 73.5% of it below 36.3 and the remainder exactly at 36.3, right
+      // inside the amber.
+      //
+      // Brightness helps -- the arrow is v=1.00 throughout and the brown never gets
+      // past .72 -- but it is not enough on its own, because the amber reaches .96.
+      // What actually separates an arrow from HUD text is that an arrow is a solid
+      // blob; see the density gate in readWind.
+      //
+      // One asymmetry to know about: every darts recording reports 'none', which
+      // makes them a free test that red is not seen where it should not be. None of
+      // them contains an 18+ mph wind, so that red IS seen when it should be stays
+      // unverified until one turns up.
+      const windPx = (h, s, v) =>
+        s > 0.35 && v > 0.6 && (
+          (h > 165 && h < 215) ||            // cyan
+          (h > 270 && h < 335) ||            // magenta
+          (h < 45 && v > 0.85)               // red, 18 mph and up
+        );
+
       function readWind(S) {
         if (!S) return { key: 'none', deg: 0 };
         let pts = [];
         for (let y = 0; y < S.h; y++)
           for (let x = 0; x < S.w; x++) {
             const [h, s, v] = px(S, x, y);
-            if (s > 0.35 && v > 0.6 && ((h > 165 && h < 215) || (h > 270 && h < 335))) pts.push({ x, y, h });
+            if (windPx(h, s, v)) pts.push({ x, y, h });
           }
-        if (pts.length < 8) return { key: 'none', deg: 0 };
+        // An arrow is a BLOB, not a scattering. Requiring merely 8 pixels was
+        // enough while only cyan and magenta were matched -- neither colour appears
+        // in the HUD -- but red shares the HUD's own palette, and a handful of
+        // amber text pixels would otherwise be read as a wind.
+        //
+        // Density is what separates them, and it does not care about colour at all:
+        // the arrow sprites fill 4-8% of this window (480, 518 and 258 px of a
+        // window that is 0.12W x 0.10H), while the amber scatter that was being
+        // picked up ran 22-32 px, under half a percent. 2% sits in the gap with
+        // room on both sides.
+        //
+        // This replaces a v threshold that was being tuned against whichever frame
+        // was last looked at -- .85 let 70 false frames through, .97 still let 22
+        // through -- which is fitting a constant to noise rather than measuring.
+        if (pts.length < 0.02 * S.w * S.h) return { key: 'none', deg: 0 };
         // The window catches a few matching pixels hard against its left edge that
         // are not part of the arrow at all -- seen as a stray column many pixels
         // clear of the glyph in a captured mask. They are far enough out to drag
@@ -3132,7 +3190,12 @@
         let ux = Math.cos(th), uy = Math.sin(th);
         if (ux < 0) { ux = -ux; uy = -uy; }
         const hue = pts.reduce((p, c) => p + c.h, 0) / n;
-        return { key: hue < 240 ? 'cyan' : 'magenta', deg: Math.atan2(-uy, ux) * 180 / Math.PI };
+        // Staged, not a single split: red sits at ~20, which a `hue < 240` test
+        // would have called cyan. predict() no longer cares which name it gets --
+        // every detected wind is trusted since v6 -- but the status line says it
+        // and the probe records it, so it should be the truth.
+        const key = hue < 45 ? 'red' : hue < 240 ? 'cyan' : 'magenta';
+        return { key, deg: Math.atan2(-uy, ux) * 180 / Math.PI };
       }
 
       // ---------- reading the wind speed ----------
