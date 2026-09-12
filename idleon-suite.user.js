@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         IdleOn Helper Suite
 // @namespace    nativerobot
-// @version      1.28
+// @version      1.29
 // @downloadURL https://raw.githubusercontent.com/averagenative/idleon-userscripts/main/idleon-suite.user.js
 // @updateURL   https://raw.githubusercontent.com/averagenative/idleon-userscripts/main/idleon-suite.user.js
 // @description  All-in-one: autoclicker + Hoops, Fishing and Darts minigame helpers for Legends of IdleOn, each one individually switchable
@@ -2692,6 +2692,33 @@
         } catch (e) { return null; }
       }
 
+      // Native-resolution crop of the wind arrow. The direction used to be read off
+      // the /scale frame, where the arrow survives as ~47 pixels, and that is where
+      // its noise came from -- not from the method. Rotating the real glyph through
+      // a known sweep and re-reading it at each resolution:
+      //
+      //   scale 1  451px   error sd 0.6 deg   worst  1.3
+      //   scale 2  148px   error sd 2.2 deg   worst  7.0
+      //   scale 4   47px   error sd 9.7 deg   worst 22.4   <- what this used to use
+      //   scale 6   25px   error sd 14.5 deg  worst 40.3
+      //
+      // At native resolution the principal axis tracks rotation to about a degree.
+      // Same failure as the fishing gauge in 2232d91 and the mph glyph gates: a
+      // measurement taken through the downscale that only needed the full frame.
+      const windC = document.createElement('canvas');
+      const wctx = windC.getContext('2d', { willReadFrequently: true });
+      function grabWind(cv) {
+        const sx = Math.round(cv.width * 0.56), sw = Math.round(cv.width * 0.12);
+        const sy = Math.round(cv.height * 0.02), sh = Math.round(cv.height * 0.10);
+        if (sw < 8 || sh < 8) return null;
+        if (windC.width !== sw || windC.height !== sh) { windC.width = sw; windC.height = sh; }
+        try {
+          wctx.clearRect(0, 0, sw, sh);
+          wctx.drawImage(cv, sx, sy, sw, sh, 0, 0, sw, sh);
+          return { d: wctx.getImageData(0, 0, sw, sh).data, w: sw, h: sh };
+        } catch (e) { return null; }
+      }
+
       function hsv(r, g, b) {
         const mx = r > g ? (r > b ? r : b) : (g > b ? g : b);
         const mn = r < g ? (r < b ? r : b) : (g < b ? g : b);
@@ -2779,18 +2806,53 @@
       // Read from the colour of the HUD arrow rather than the "N mph" text: cyan and
       // magenta are unmistakable and need no OCR.
       // The arrow ROTATES — the same 9 mph shows pointing up-right, level, and
-      // down-right — so wind has a 2D direction, not just a strength. Its principal
-      // axis gives that direction; every arrow observed so far points rightward, so
-      // the axis is resolved toward +x. Colour is only a coarse strength band: 4 mph
-      // and 9 mph are both cyan, so colour cannot stand in for speed.
-      function readWind(I) {
-        const pts = [];
-        for (let y = Math.round(I.h * 0.02); y < Math.round(I.h * 0.12); y++)
-          for (let x = Math.round(I.w * 0.56); x < Math.round(I.w * 0.68); x++) {
-            const [h, s, v] = px(I, x, y);
+      // down-right — so wind has a 2D direction, not just a strength. Colour is only
+      // a coarse strength band: 4 mph and 9 mph are both cyan, so colour cannot
+      // stand in for speed.
+      //
+      // CAUTION: the principal axis is NOT the direction the arrow points, and the
+      // old note here saying it was is wrong. The glyph is a chunky double chevron
+      // that narrows at both ends, and its axis of greatest variance sits at a fixed
+      // angle to its point. Rotating a captured glyph through a known sweep shows
+      // the axis tracking rotation almost exactly — error sd 0.6 deg at native
+      // resolution — but with a CONSTANT offset of about 45 deg against the frame it
+      // was captured in. So this function returns a value that is rotation-correct
+      // and origin-wrong: differences between two readings are trustworthy, the
+      // absolute bearing is not.
+      //
+      // Pinning the offset needs one arrow whose true direction is independently
+      // known, and it probably needs one PER COLOUR: the magenta glyph is a
+      // different sprite from the cyan one (a third the size, per the v3 notes), so
+      // there is no reason for their axes to sit at the same angle to their points.
+      // Until that is measured, predict() is being handed a bearing with an unknown
+      // constant error, which is why windK's vertical component and the HV ratio
+      // cannot be fitted from flight data — every such fit takes sin(deg) as input.
+      // Do not "calibrate" windK against this until the offset is anchored.
+      // S is the native-resolution crop from grabWind, so the whole image IS the
+      // window -- no sub-window arithmetic here any more.
+      function readWind(S) {
+        if (!S) return { key: 'none', deg: 0 };
+        let pts = [];
+        for (let y = 0; y < S.h; y++)
+          for (let x = 0; x < S.w; x++) {
+            const [h, s, v] = px(S, x, y);
             if (s > 0.35 && v > 0.6 && ((h > 165 && h < 215) || (h > 270 && h < 335))) pts.push({ x, y, h });
           }
         if (pts.length < 8) return { key: 'none', deg: 0 };
+        // The window catches a few matching pixels hard against its left edge that
+        // are not part of the arrow at all -- seen as a stray column many pixels
+        // clear of the glyph in a captured mask. They are far enough out to drag
+        // the centroid, and the principal axis with it, so cut anything well
+        // outside the main mass before measuring.
+        {
+          let cx = 0, cy = 0;
+          for (const q of pts) { cx += q.x; cy += q.y; }
+          cx /= pts.length; cy /= pts.length;
+          const d = pts.map(q => Math.hypot(q.x - cx, q.y - cy)).sort((a, b) => a - b);
+          const cut = d[Math.floor(d.length * 0.95)] * 1.6;
+          const core = pts.filter(q => Math.hypot(q.x - cx, q.y - cy) <= cut);
+          if (core.length >= 8) pts = core;
+        }
         const n = pts.length;
         let mx = 0, my = 0;
         for (const q of pts) { mx += q.x; my += q.y; }
@@ -3223,7 +3285,7 @@
         const b = findBoard(I, W, H);
         if (b) { board = b; boardT = performance.now(); }
         else if (performance.now() - boardT > 900) board = null;
-        wind = readWind(I);
+        wind = readWind(grabWind(cv));
         if (wind.key !== 'none') wind.mph = readMph(grabMph(cv));
 
         const t = performance.now();
