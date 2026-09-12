@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         IdleOn Helper Suite
 // @namespace    nativerobot
-// @version      1.36
+// @version      1.37
 // @downloadURL https://raw.githubusercontent.com/averagenative/idleon-userscripts/main/idleon-suite.user.js
 // @updateURL   https://raw.githubusercontent.com/averagenative/idleon-userscripts/main/idleon-suite.user.js
 // @description  All-in-one: autoclicker + Hoops, Fishing and Darts minigame helpers for Legends of IdleOn, each one individually switchable
@@ -193,7 +193,21 @@
   // The hub owns the layout controls, but a drag out of a dock has to change
   // the layout from inside makePanel. This is the seam between the two.
   let onLayoutChange = () => {};
-  function syncLayout() { relayout(); onLayoutChange(); }
+  // Solo has to be an invariant, not just something the collapse button does.
+  // Arriving in a dock with four helpers already open gives a column that needs
+  // two of them to fit — which is the exact thing the dock is for avoiding. So
+  // entering a docked layout closes all but the first open helper.
+  function enforceSolo() {
+    if (!suite.solo || suite.layout === 'free') return;
+    let kept = false;
+    const list = docks.slice().sort((a, b) => (a.def.dockOrder ?? 99) - (b.def.dockOrder ?? 99));
+    for (const d of list) {
+      if (!d.def.helper || d.ui.cfg.collapsed) continue;
+      if (!kept) { kept = true; continue; }      // the first open one stays open
+      d.ui.cfg.collapsed = true; d.ui.save(); d.ui.chrome();
+    }
+  }
+  function syncLayout() { enforceSolo(); relayout(); onLayoutChange(); }
 
   // Collapsing a panel changes every panel below it, so the re-stack is
   // coalesced to one pass per frame rather than run per panel per change.
@@ -3845,6 +3859,7 @@
         <div class="row"><label>One helper at a time</label><input id="solo" type="checkbox"></div>
         <div class="row"><label>Auto-open active</label><input id="follow" type="checkbox"></div>
         <hr>
+        <button class="btn sm" id="rollup">Minimise all</button>
         <button class="btn sm" id="panels">Hide all panels</button>
         <button class="btn sm" id="reset">Reset panel layout</button>
         <div class="hint">unticking a helper stops it:<br>no panel, no readback, no hotkey</div>`
@@ -3858,6 +3873,7 @@
     // "all hidden" drives the button's label, so it reads as the thing it is
     // about to do rather than as the state it is in.
     const anyShown = () => MODULES.some(m => live.has(m.id) && !m.cfg.hidden);
+    const anyOpen  = () => MODULES.some(m => live.has(m.id) && !m.cfg.collapsed);
 
     function syncHub() {
       for (const m of MODULES) {
@@ -3868,6 +3884,7 @@
         eye.className = 'eye' + (off ? ' off' : '');
       }
       hub.$('#panels').textContent = anyShown() ? 'Hide all panels' : 'Show all panels';
+      hub.$('#rollup').textContent = anyOpen() ? 'Minimise all' : 'Expand all';
       for (const l of ['free', 'left', 'top'])
         hub.$('#lay-' + l).classList.toggle('sel', suite.layout === l);
       hub.$('#solo').checked = !!suite.solo;
@@ -3891,6 +3908,20 @@
     hub.$('#solo').onchange = e => { suite.solo = e.target.checked; saveSuite(); };
     hub.$('#follow').onchange = e => { suite.follow = e.target.checked; saveSuite(); };
     onLayoutChange = syncHub;
+
+    // Rolls every helper up to its title bar without hiding it — the panels
+    // stay on screen and stay clickable, which is the difference from "Hide
+    // all panels". In a dock that is also how you get back to one short column
+    // after several have been opened.
+    hub.$('#rollup').onclick = () => {
+      const roll = anyOpen();
+      for (const m of MODULES) {
+        m.cfg.collapsed = roll; m.save();
+        const inst = live.get(m.id);
+        if (inst) inst.ui.chrome();
+      }
+      syncHub();
+    };
 
     hub.$('#panels').onclick = () => {
       const hide = anyShown();

@@ -193,7 +193,21 @@
   // The hub owns the layout controls, but a drag out of a dock has to change
   // the layout from inside makePanel. This is the seam between the two.
   let onLayoutChange = () => {};
-  function syncLayout() { relayout(); onLayoutChange(); }
+  // Solo has to be an invariant, not just something the collapse button does.
+  // Arriving in a dock with four helpers already open gives a column that needs
+  // two of them to fit — which is the exact thing the dock is for avoiding. So
+  // entering a docked layout closes all but the first open helper.
+  function enforceSolo() {
+    if (!suite.solo || suite.layout === 'free') return;
+    let kept = false;
+    const list = docks.slice().sort((a, b) => (a.def.dockOrder ?? 99) - (b.def.dockOrder ?? 99));
+    for (const d of list) {
+      if (!d.def.helper || d.ui.cfg.collapsed) continue;
+      if (!kept) { kept = true; continue; }      // the first open one stays open
+      d.ui.cfg.collapsed = true; d.ui.save(); d.ui.chrome();
+    }
+  }
+  function syncLayout() { enforceSolo(); relayout(); onLayoutChange(); }
 
   // Collapsing a panel changes every panel below it, so the re-stack is
   // coalesced to one pass per frame rather than run per panel per change.
