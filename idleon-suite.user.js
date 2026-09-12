@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         IdleOn Helper Suite
 // @namespace    nativerobot
-// @version      1.27
+// @version      1.28
 // @downloadURL https://raw.githubusercontent.com/averagenative/idleon-userscripts/main/idleon-suite.user.js
 // @updateURL   https://raw.githubusercontent.com/averagenative/idleon-userscripts/main/idleon-suite.user.js
 // @description  All-in-one: autoclicker + Hoops, Fishing and Darts minigame helpers for Legends of IdleOn, each one individually switchable
@@ -2567,12 +2567,22 @@
         // -0.023 (-17px on a 747px canvas). With the angle corrected at source,
         // keeping landN would over-correct in the opposite direction.
         //
-        // It is zero rather than deleted because a real residual may remain once
-        // the aim is right — vN and gN measure true to 1% (see below), so if
-        // anything is still left it belongs here. Measure it before setting it:
-        // the flight record now carries the launch point and every observed
-        // position, so a residual can be read off directly instead of fitted
-        // through the other three constants.
+        // Zero is now MEASURED, not provisional. With the aim corrected, the
+        // shipped predict() was run from each recorded launch point and compared
+        // against every observed position of 19 no-wind tracked flights: 16 of the
+        // 19 track the real dart at 1.6-8.3px rms over the whole arc, and observed
+        // minus predicted at the end of tracking averages +0.1px (sd 11.2). There
+        // is no residual left for this term to hold. The three that miss start
+        // wrong rather than drift wrong -- their launch point was recorded far from
+        // where the dart was first seen -- so they measure the launch capture, not
+        // the flight model.
+        //
+        // Beware the trap that made this look otherwise: pairing a landing on the
+        // board against "the last prediction before it landed" gives a mean of
+        // -75px with sd 88 even now, because the dart is airborne for about a
+        // second while the aim sweep moves on, so the prediction being compared
+        // belongs to a later aim. That method cannot measure this and should not be
+        // used to re-tune landN. Compare against the tracked flight instead.
         landN: 0,          // landing correction / height
         // Magenta wind stays gated to zero in predict(): its arrow glyph is a
         // third the size of cyan's and its direction read is unreliable — see v3
