@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         IdleOn Helper Suite
 // @namespace    nativerobot
-// @version      1.35
+// @version      1.36
 // @downloadURL https://raw.githubusercontent.com/averagenative/idleon-userscripts/main/idleon-suite.user.js
 // @updateURL   https://raw.githubusercontent.com/averagenative/idleon-userscripts/main/idleon-suite.user.js
 // @description  All-in-one: autoclicker + Hoops, Fishing and Darts minigame helpers for Legends of IdleOn, each one individually switchable
@@ -550,13 +550,23 @@
             xyEl = $('#xy'), setBtn = $('#set');
 
       let on = false, timer = null, capturing = false;
-      let lastX = 0, lastY = 0;
-      ui.on(document, 'mousemove', e => { lastX = e.clientX; lastY = e.clientY; }, true);
+      // lastX/lastY only move while the pointer is over THIS window, so in a
+      // second window they go stale on the way out and are 0,0 before it has
+      // ever arrived. See the standalone clicker for the whole story; ptrIn is
+      // what says whether the coordinates mean anything.
+      let lastX = 0, lastY = 0, ptrIn = false, wasBlind = false;
+      ui.on(document, 'mousemove', e => {
+        lastX = e.clientX; lastY = e.clientY; ptrIn = true;
+      }, true);
+      // A null relatedTarget is the pointer leaving the document altogether;
+      // leaving for a panel names that element instead and does not count.
+      ui.on(document, 'mouseout', e => { if (!e.relatedTarget) ptrIn = false; }, true);
 
       function sync() {
         ivMinEl.value = cfg.ivMin; ivMaxEl.value = cfg.ivMax; jpEl.value = cfg.jitterPx;
         root.querySelectorAll('.seg button').forEach(b => b.classList.toggle('sel', b.dataset.m === cfg.mode));
-        xyEl.textContent = cfg.mode !== 'fixed' ? '(follows cursor)'
+        xyEl.textContent = cfg.mode !== 'fixed'
+          ? (ptrIn ? '(follows cursor)' : 'cursor is in another window')
           : hasTarget() ? fixedPoint().map(Math.round).join(', ') : 'not set';
         dot.classList.toggle('on', on);
         runBtn.textContent = on ? 'Stop  (F8)' : 'Start  (F8)';
@@ -608,8 +618,15 @@
 
       function tick() {
         if (!on) return;
+        // Cursor mode with the pointer in another window has nothing to aim at, so
+        // it holds rather than clicking a stale coordinate. The timer keeps running
+        // and it resumes by itself when the pointer comes back. Announced, because
+        // the failure is otherwise invisible: the clicker looks like it is running
+        // and the game just never responds.
+        const blind = cfg.mode !== 'fixed' && !ptrIn;
+        if (blind !== wasBlind) { wasBlind = blind; sync(); }
         // Resolved every tick: the canvas rect can change under a running clicker.
-        if (cfg.mode !== 'fixed' || hasTarget()) {
+        if (!blind && (cfg.mode !== 'fixed' || hasTarget())) {
           const [tx, ty] = cfg.mode === 'fixed' ? fixedPoint() : [lastX, lastY];
           clickAt(tx, ty);
         }
