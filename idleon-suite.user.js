@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         IdleOn Helper Suite
 // @namespace    nativerobot
-// @version      1.44
+// @version      1.45
 // @downloadURL https://raw.githubusercontent.com/averagenative/idleon-userscripts/main/idleon-suite.user.js
 // @updateURL   https://raw.githubusercontent.com/averagenative/idleon-userscripts/main/idleon-suite.user.js
 // @description  All-in-one: autoclicker + Hoops, Fishing and Darts minigame helpers for Legends of IdleOn, each one individually switchable
@@ -725,7 +725,7 @@
         debug: false,      // outline every detected blob
         // Calibration is stored as fractions of canvas size so it survives resizing
         // the window — the game scales its physics with the viewport.
-        calVer: 7,         // bump to throw away calibration learned by an older build
+        calVer: 8,         // bump to throw away calibration learned by an older build
         // The shot is a fixed parabola anchored to the PLATFORM, not to the ball in
         // your hands. Written as y = platY + A*(u - uL)*(u - R) where u is distance
         // right of the platform centre: A is curvature, uL and R are where the path
@@ -859,16 +859,15 @@
         // platform-relative, the arc meets platform height further out when the
         // platform sits lower, which is the observed sign. Settling it needs the
         // release instant, which nothing currently measures.
-        // v7: the seed is now derived rather than fitted. Curvature is g/2vx^2 with
-        // g = 0.069 and vx = 3.9 per 10ms step, which on the 960-wide design canvas
-        // is 0.069/(2*3.9^2)*960 = 2.177. The old 2.233 came off 13 tracked flights
-        // (sd 0.034, range 2.195..2.288) and sits just outside that, i.e. it is a
-        // systematic 2.6% rather than noise -- the same direction and size as the
-        // tracking bias found in the darts helper, where following a blob centroid
-        // through a rotating sprite inflated fitted accelerations. Self-calibration
-        // still runs and will pull toward whatever the tracker sees; this only
-        // changes where a fresh install starts.
-        shotA: 2.177,      // curvature x canvas width
+        // Back to 2.233, the value fitted from 13 tracked flights (sd 0.034, range
+        // 2.195..2.288). v7 replaced it with 2.177, derived as g/2vx^2 on the
+        // 960-wide design canvas, on the argument that the 2.6% gap was a
+        // systematic tracking bias rather than noise. Measuring the offline rip of
+        // the game settles it the other way: its own per-flight fits put curvature
+        // at 2.2205, which sits with the original fit and not with the derivation.
+        // Two independent measurements agreeing against one derivation means the
+        // derivation is what is wrong.
+        shotA: 2.233,      // curvature x canvas width
         shotL: -0.119,     // upward crossing, fraction of width left of the platform
         shotR: 0.547,      // landing range, fraction of width right of the platform
         calSeeded: true,
@@ -879,9 +878,9 @@
       // live flights the committed curvature ranged 1.865-2.941 around a true
       // 2.23 — a live config caught mid-session held 2.486. That is not stale, it
       // is contaminated, and averaging more shots into it does not wash it out.
-      if (cfg.calVer !== 7) {
-        cfg.calVer = 7; cfg.calSeeded = true;
-        cfg.shotA = 2.177; cfg.shotL = -0.119; cfg.shotR = 0.547;
+      if (cfg.calVer !== 8) {
+        cfg.calVer = 8; cfg.calSeeded = true;
+        cfg.shotA = 2.233; cfg.shotL = -0.119; cfg.shotR = 0.547;
       }
       delete cfg.grav; delete cfg.launch; delete cfg.launchN; delete cfg.gravN;
   });
@@ -1711,13 +1710,35 @@
         // exactly when you need it to line up the next shot.
         if (cfg.ghost && plat && ready) {
           const dir = lastRim ? Math.sign(lastRim.x - plat.x) || 1 : 1;
-          // Re-enabled. It was switched off in 57faab9 because deriving cos from
-          // |sin| plus a direction sign made the preview jump at every turning
-          // point; the phase fit in platCos() removed that (34 sign flips and 17
-          // jumps over 0.5 became 7 smooth zero crossings and none), and the
-          // coupling itself is now measured off 65 offline shots rather than
-          // derived from geometry that had it backwards.
-          const curve = shotCurve(plat.x, plat.y, dir, W, cosPhi);
+          // DISABLED AGAIN, on outcome data rather than on how the preview looks.
+          //
+          // Driven against the offline rip with the game's own score as ground
+          // truth, 49 shots paired from release to result:
+          //
+          //     GREEN  n=28    1/28 swish     19/28 scored (68%)
+          //     red    n=21    0/21 swish     14/21 scored (67%)
+          //
+          // Green means "this arc threads the hole". One of 28 did. And green
+          // scores no better than red, so the preview carries no information about
+          // whether the shot goes in -- which makes a second-order correction to it
+          // unmeasurable by construction.
+          //
+          // The reported feel matches: descending shots are worse (10/16 against
+          // 9/12 ascending, though that gap is only ~0.7 SE and proves nothing on
+          // its own), and ascending is off too when the rim is CLOSE -- small u,
+          // where the arc is dominated by uL, which is the term this correction
+          // moves hardest at up to 0.095 W. The most likely reading is that the
+          // measured L slope is too large to apply raw.
+          //
+          // Re-enabling it on a correlation with the per-flight fits was too weak a
+          // standard. Fits are the helper's own reading of the arc; whether shots
+          // go in is the thing that matters, and by that measure this does not
+          // help. The estimator and the measurements stay -- platCos is sound and
+          // the coupling is real -- but nothing here ships until the arc's error at
+          // the rim (a known mean of 54.7px, worst 117.5px, far wider than the
+          // hole) is brought down. A 70px correction cannot be judged against a
+          // 55px baseline error.
+          const curve = shotCurve(plat.x, plat.y, dir, W, null);
           // Start the line directly above the platform rather than at the curve's
           // left crossing: that crossing is ~0.18 of a screen to the left, which
           // ran off the edge and made the arc appear to fly in from nowhere.
