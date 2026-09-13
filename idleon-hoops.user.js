@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         IdleOn Hoops Helper
 // @namespace    nativerobot
-// @version      1.13
+// @version      1.14
 // @downloadURL https://raw.githubusercontent.com/averagenative/idleon-userscripts/main/idleon-hoops.user.js
 // @updateURL   https://raw.githubusercontent.com/averagenative/idleon-userscripts/main/idleon-hoops.user.js
 // @description  Dotted-line shot preview + live ball arc for the Swishy Hoops minigame in Legends of IdleOn
@@ -744,21 +744,34 @@
     const A = cfg.shotA / W;
     let uL = cfg.shotL * W, uR = cfg.shotR * W;
     if (cosPhi != null) {
-      // Re-cut the parabola for the vy this particular throw will actually get.
-      // Curvature is g/2vx^2 and cannot move -- neither g nor vx depends on the
-      // oscillator -- so the only thing that changes is the launch slope, by
-      // d(vy/vx) = 0.7*cos/3.9. The release point is left exactly where the
-      // shipped constants put it, which means cosPhi 0 reproduces the old curve
-      // to the pixel and this can only add the variation that was missing.
-      const ur = RELX * W;
-      const yr = A * (ur - uL) * (ur - uR);
-      const m = A * (2 * ur - uL - uR) + (0.7 * cosPhi) / 3.9;
-      const disc = m * m - 4 * A * yr;
-      if (disc > 0) {
-        const r = Math.sqrt(disc);
-        uL = ur + (-m - r) / (2 * A);
-        uR = ur + (-m + r) / (2 * A);
-      }
+      // MEASURED, not derived. The physics is certain -- platform height and
+      // release velocity are one oscillator in quadrature -- but the geometry
+      // for how a change in vy redistributes between the two crossings was
+      // wrong, and confidently so.
+      //
+      // Re-cutting the parabola from a fixed release point predicted the effect
+      // landing almost entirely on R (-0.0654 per unit cos) and barely touching
+      // L (-0.0171). Driven against the offline rip of the game -- 65 shots,
+      // 14 committed per-flight fits, cos sampled across its whole range -- the
+      // truth is the other way round:
+      //
+      //     A vs cos   +0.0235 +-0.0435   r2 0.02   (predicted 0: confirmed)
+      //     L vs cos   -0.0949 +-0.0165   r2 0.73   (predicted -0.0171)
+      //     R vs cos   +0.0253 +-0.0132   r2 0.23   (predicted -0.0654)
+      //
+      // Curvature is untouched by the oscillator exactly as the physics says,
+      // which is the part of the model that holds. But the coupling shows up in
+      // L at 5.8 standard errors, while R has the wrong sign and does not clear
+      // two. Most likely because the tracked part of a flight pins the
+      // descending branch, leaving L to absorb the change -- R is measured, L
+      // is extrapolated.
+      //
+      // So the slopes are taken from the fits instead of from the geometry.
+      // R's is left in at its measured value despite being weak; dropping it
+      // would tilt the arc, and 0.0253 is small enough that being wrong about
+      // it costs little either way.
+      uL += -0.0949 * cosPhi * W;
+      uR += 0.0253 * cosPhi * W;
     }
     return { at: x => { const u = (x - px) * dir; return py + A * (u - uL) * (u - uR); },
              A, uL, uR, px, py, dir };
@@ -1132,20 +1145,13 @@
     // exactly when you need it to line up the next shot.
     if (cfg.ghost && plat && ready) {
       const dir = lastRim ? Math.sign(lastRim.x - plat.x) || 1 : 1;
-      // DISABLED pending a correct phase estimate -- see platCos(). Deriving
-      // cos from |sin| plus a direction-of-travel sign makes the arc JUMP at
-      // every turning point: measured on a real run, 34 sign flips and 17
-      // jumps of over 0.5 in cos, the worst going +0.946 -> -0.955 between two
-      // frames. That is the preview leaping between the strongest and weakest
-      // shot, which is worse than no correction at all.
-      //
-      // The reasoning that said this was safe -- "near the turning points cos
-      // is near zero, so a wrong sign costs little" -- was wrong. It holds only
-      // if y0 and amp are right, and they are not: taken from observed min/max
-      // they are outlier-sensitive, and the detector picks different rows of
-      // the platform as it slides. At the observed reversal sin was 0.288, so
-      // |cos| was 0.957 and the flip cost everything.
-      const curve = shotCurve(plat.x, plat.y, dir, W, null);
+      // Re-enabled. It was switched off in 57faab9 because deriving cos from
+      // |sin| plus a direction sign made the preview jump at every turning
+      // point; the phase fit in platCos() removed that (34 sign flips and 17
+      // jumps over 0.5 became 7 smooth zero crossings and none), and the
+      // coupling itself is now measured off 65 offline shots rather than
+      // derived from geometry that had it backwards.
+      const curve = shotCurve(plat.x, plat.y, dir, W, cosPhi);
       // Start the line directly above the platform rather than at the curve's
       // left crossing: that crossing is ~0.18 of a screen to the left, which
       // ran off the edge and made the arc appear to fly in from nowhere.
