@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         IdleOn Helper Suite
 // @namespace    nativerobot
-// @version      1.45
+// @version      1.46
 // @downloadURL https://raw.githubusercontent.com/averagenative/idleon-userscripts/main/idleon-suite.user.js
 // @updateURL   https://raw.githubusercontent.com/averagenative/idleon-userscripts/main/idleon-suite.user.js
 // @description  All-in-one: autoclicker + Hoops, Fishing and Darts minigame helpers for Legends of IdleOn, each one individually switchable
@@ -1704,7 +1704,7 @@
         }
 
         // ---- shot preview, anchored to the platform ----
-        let ghostMade = null;
+        let ghostMade = null, ghostRimY = null;
         // Drawn whenever a ball is in your hands — NOT gated on "no shot in flight".
         // After a miss both are true at once, and suppressing the preview then is
         // exactly when you need it to line up the next shot.
@@ -1743,6 +1743,11 @@
           // left crossing: that crossing is ~0.18 of a screen to the left, which
           // ran off the edge and made the arc appear to fly in from nowhere.
           ghostMade = drawCurve(curve.at, plat.x, dir, W, H, 'ghost');
+          // Where the predicted arc crosses the rim's x. This is the number that
+          // decides a make, and publishing it is what makes the error MEASURABLE
+          // rather than just "missed": against the ball's true height there, it
+          // gives a signed error with a direction and a size.
+          if (lastRim) ghostRimY = +curve.at(lastRim.x).toFixed(1);
           octx.save();
           const topY = curve.at(plat.x);
           octx.strokeStyle = 'rgba(255,122,112,.35)';             // tie the arc to the platform
@@ -1776,7 +1781,7 @@
 
         probe({
           frame, plat, rim: lastRim, rimWhy, blobs: cands.length, tracks: tracks.length,
-          flying, made, ready, ghostMade,
+          flying, made, ready, ghostMade, ghostRimY,
           cal: { a: cfg.shotA, l: cfg.shotL, r: cfg.shotR, seeded: cfg.calSeeded },
           // null until most of one platform swing has been seen; then the
           // quadrature term that sets how hard this particular shot leaves
