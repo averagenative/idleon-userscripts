@@ -933,6 +933,34 @@
   const SCORE_DY = 0.04431;    // * H: detected rim.y -> scoring point y
   const SCORE_R = 0.04630;     // * H: scoring radius (25px on a 540-tall canvas)
 
+  // DEAD END, measured, do not retry without new evidence: widening SCORE_R to
+  // catch bank-ins. Most makes here are banked (20 of 26 in one session), and a
+  // ballistic arc cannot predict a ball that rattles in, so a wider radius
+  // looks like the obvious fix. It is not, because the predicted distance
+  // carries almost no information about the outcome in the first place.
+  //
+  // Measured over 43 shots, ghostMinDist against whether the shot actually
+  // scored:
+  //     mean ghostMinDist | made  42.4px
+  //     mean ghostMinDist | miss  43.2px
+  //     AUC 0.474   (0.5 is no information at all; 1.0 is perfect)
+  // Fitting the best threshold on half the shots and scoring it on the other
+  // half gave 29% and 55%, straddling the 51% always-say-miss baseline. There
+  // is no threshold to find.
+  //
+  // The same circle test fed the game's OWN ball trace instead of this
+  // prediction scores AUC 1.000, so the criterion and the geometry are right --
+  // the arc simply is not accurate enough at the rim to discriminate. Residual
+  // arc error is sd 29-49px depending on session, against a 25px radius.
+  // Fix the arc, or the rim detection behind it, before touching this radius.
+  //
+  // Note the session dependence, which is the live lead: on identical code,
+  // arc error sd ran 28.7, 35.3 and 49.3 across three sessions, and rim
+  // detection noise (rimDy sd) ran 2.84, 2.98 and 6.95, degrading as the score
+  // climbed and the hoop moved. Score any change to this per session; overall
+  // ghostMade agreement swung 62% -> 44% between two sessions of the SAME
+  // build, so cross-session comparisons of it are not meaningful at n = 43.
+
   // Closest point on segment P0->P1 to target T, clamped so it cannot fall
   // outside the segment (standard clamped projection). Used instead of
   // point-to-point distance because the arc below is only sampled every
