@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         IdleOn Hoops Helper
 // @namespace    nativerobot
-// @version      1.12
+// @version      1.15
 // @downloadURL https://raw.githubusercontent.com/averagenative/idleon-userscripts/main/idleon-hoops.user.js
 // @updateURL   https://raw.githubusercontent.com/averagenative/idleon-userscripts/main/idleon-hoops.user.js
 // @description  Dotted-line shot preview + live ball arc for the Swishy Hoops minigame in Legends of IdleOn
@@ -54,7 +54,7 @@
     debug: false,      // outline every detected blob
     // Calibration is stored as fractions of canvas size so it survives resizing
     // the window — the game scales its physics with the viewport.
-    calVer: 7,         // bump to throw away calibration learned by an older build
+    calVer: 8,         // bump to throw away calibration learned by an older build
     // The shot is a fixed parabola anchored to the PLATFORM, not to the ball in
     // your hands. Written as y = platY + A*(u - uL)*(u - R) where u is distance
     // right of the platform centre: A is curvature, uL and R are where the path
@@ -188,16 +188,15 @@
     // platform-relative, the arc meets platform height further out when the
     // platform sits lower, which is the observed sign. Settling it needs the
     // release instant, which nothing currently measures.
-    // v7: the seed is now derived rather than fitted. Curvature is g/2vx^2 with
-    // g = 0.069 and vx = 3.9 per 10ms step, which on the 960-wide design canvas
-    // is 0.069/(2*3.9^2)*960 = 2.177. The old 2.233 came off 13 tracked flights
-    // (sd 0.034, range 2.195..2.288) and sits just outside that, i.e. it is a
-    // systematic 2.6% rather than noise -- the same direction and size as the
-    // tracking bias found in the darts helper, where following a blob centroid
-    // through a rotating sprite inflated fitted accelerations. Self-calibration
-    // still runs and will pull toward whatever the tracker sees; this only
-    // changes where a fresh install starts.
-    shotA: 2.177,      // curvature x canvas width
+    // Back to 2.233, the value fitted from 13 tracked flights (sd 0.034, range
+    // 2.195..2.288). v7 replaced it with 2.177, derived as g/2vx^2 on the
+    // 960-wide design canvas, on the argument that the 2.6% gap was a
+    // systematic tracking bias rather than noise. Measuring the offline rip of
+    // the game settles it the other way: its own per-flight fits put curvature
+    // at 2.2205, which sits with the original fit and not with the derivation.
+    // Two independent measurements agreeing against one derivation means the
+    // derivation is what is wrong.
+    shotA: 2.233,      // curvature x canvas width
     shotL: -0.119,     // upward crossing, fraction of width left of the platform
     shotR: 0.547,      // landing range, fraction of width right of the platform
     calSeeded: true,
@@ -211,9 +210,9 @@
   // live flights the committed curvature ranged 1.865-2.941 around a true
   // 2.23 — a live config caught mid-session held 2.486. That is not stale, it
   // is contaminated, and averaging more shots into it does not wash it out.
-  if (cfg.calVer !== 7) {
-    cfg.calVer = 7; cfg.calSeeded = true;
-    cfg.shotA = 2.177; cfg.shotL = -0.119; cfg.shotR = 0.547;
+  if (cfg.calVer !== 8) {
+    cfg.calVer = 8; cfg.calSeeded = true;
+    cfg.shotA = 2.233; cfg.shotL = -0.119; cfg.shotR = 0.547;
   }
   delete cfg.grav; delete cfg.launch; delete cfg.launchN; delete cfg.gravN;
   const save = () => localStorage.setItem(KEY, JSON.stringify(cfg));
@@ -637,26 +636,68 @@
   // one ~5s cycle that looks locally linear and correlates strongly, then fails
   // out of sample -- exactly the 43%-better-on-shotL, 3%-better-at-the-rim
   // split that was measured.
-  let platLo = Infinity, platHi = -Infinity, platHist = [];
+  // The phase is estimated AS A PHASE. The first attempt recovered cos from
+  // |sin| plus a direction-of-travel sign, which is discontinuous exactly where
+  // the platform spends most of its visible time: on a real run it flipped sign
+  // 34 times and jumped over 0.5 in cos 17 times, the worst going +0.946 to
+  // -0.955 across one frame as the platform reversed. The preview leapt between
+  // the strongest and weakest shot, which is worse than no correction. See
+  // 57faab9.
+  //
+  // The period is known exactly, so nothing has to be guessed: G16[0] gains 1.3
+  // every 20ms and phi = 1.1*G16[0] degrees, giving 71.5 deg/s and a 5.035s
+  // period. With w fixed,
+  //     platY(t) = y0 + A*sin(wt) + B*cos(wt)
+  // is linear least squares in (y0, A, B) over a window of observations, and
+  //     amp   = hypot(A, B)
+  //     cos(phi) = (A*cos(wt) - B*sin(wt)) / amp
+  // falls straight out, continuous everywhere and with no sign to choose.
+  const PLAT_W = 2 * Math.PI / 5.035;      // rad/s, from the game's own clock
+  let platHist = [];
   function platCos(H, t) {
     if (!plat) return null;
-    platHist.push({ t, y: plat.y });
-    while (platHist.length > 1 && t - platHist[0].t > 400) platHist.shift();
-    if (plat.y < platLo) platLo = plat.y;
-    if (plat.y > platHi) platHi = plat.y;
-    // The full swing is 220 of 540 on the design canvas. Until most of one has
-    // been seen the midpoint is a guess, and a wrong midpoint is worse than no
-    // correction at all.
-    if (platHi - platLo < (200 / 540) * H) return null;
-    const y0 = (platLo + platHi) / 2, amp = (platHi - platLo) / 2;
-    const sn = Math.max(-1, Math.min(1, (plat.y - y0) / amp));
-    if (platHist.length < 3) return null;
-    const dy = plat.y - platHist[0].y;
-    // Near the turning points the direction cannot be read -- but that is also
-    // where cos is near zero, so falling back to no correction there costs
-    // almost nothing. The failure is self-limiting.
-    if (Math.abs(dy) < 0.5) return null;
-    return Math.sign(dy) * Math.sqrt(Math.max(0, 1 - sn * sn));
+    platHist.push({ t: t / 1000, y: plat.y });
+    // Just over half a period. Less than that and sin and cos are too alike
+    // across the window to be told apart, which makes A and B swap freely.
+    while (platHist.length > 1 && t / 1000 - platHist[0].t > 3.0) platHist.shift();
+    const n = platHist.length;
+    if (n < 20 || t / 1000 - platHist[0].t < 2.0) return null;
+    // normal equations for y = c0 + c1*sin(wt) + c2*cos(wt)
+    let Ss = 0, Sc = 0, Sss = 0, Scc = 0, Ssc = 0, Sy = 0, Sys = 0, Syc = 0;
+    for (const q of platHist) {
+      const sn = Math.sin(PLAT_W * q.t), cs = Math.cos(PLAT_W * q.t);
+      Ss += sn; Sc += cs; Sss += sn * sn; Scc += cs * cs; Ssc += sn * cs;
+      Sy += q.y; Sys += q.y * sn; Syc += q.y * cs;
+    }
+    const M = [[n, Ss, Sc], [Ss, Sss, Ssc], [Sc, Ssc, Scc]], V = [Sy, Sys, Syc];
+    for (let i = 0; i < 3; i++) {
+      let piv = M[i][i];
+      if (Math.abs(piv) < 1e-9) return null;
+      for (let k = i + 1; k < 3; k++) {
+        const f = M[k][i] / piv;
+        for (let j = i; j < 3; j++) M[k][j] -= f * M[i][j];
+        V[k] -= f * V[i];
+      }
+    }
+    if (Math.abs(M[2][2]) < 1e-9) return null;
+    const c2 = V[2] / M[2][2];
+    const c1 = (V[1] - M[1][2] * c2) / M[1][1];
+    const c0 = (V[0] - M[0][1] * c1 - M[0][2] * c2) / M[0][0];
+    const amp = Math.hypot(c1, c2);
+    // The real swing is 110 of 540 on the design canvas. An amplitude far off
+    // that means the fit has latched onto drift or noise rather than the
+    // oscillation, and a wrong phase is worse than no correction at all.
+    const want = (110 / 540) * H;
+    if (amp < want * 0.5 || amp > want * 1.8) return null;
+    // and it has to actually describe the samples
+    let ss = 0;
+    for (const q of platHist) {
+      const pred = c0 + c1 * Math.sin(PLAT_W * q.t) + c2 * Math.cos(PLAT_W * q.t);
+      ss += (q.y - pred) * (q.y - pred);
+    }
+    if (Math.sqrt(ss / n) > amp * 0.25) return null;
+    const wt = PLAT_W * (t / 1000);
+    return Math.max(-1, Math.min(1, (c1 * Math.cos(wt) - c2 * Math.sin(wt)) / amp));
   }
   let holdT = -1e9;              // last time a ball was seen in your hands
   let flightPlat = null;         // where the platform was when this shot left
@@ -702,21 +743,34 @@
     const A = cfg.shotA / W;
     let uL = cfg.shotL * W, uR = cfg.shotR * W;
     if (cosPhi != null) {
-      // Re-cut the parabola for the vy this particular throw will actually get.
-      // Curvature is g/2vx^2 and cannot move -- neither g nor vx depends on the
-      // oscillator -- so the only thing that changes is the launch slope, by
-      // d(vy/vx) = 0.7*cos/3.9. The release point is left exactly where the
-      // shipped constants put it, which means cosPhi 0 reproduces the old curve
-      // to the pixel and this can only add the variation that was missing.
-      const ur = RELX * W;
-      const yr = A * (ur - uL) * (ur - uR);
-      const m = A * (2 * ur - uL - uR) + (0.7 * cosPhi) / 3.9;
-      const disc = m * m - 4 * A * yr;
-      if (disc > 0) {
-        const r = Math.sqrt(disc);
-        uL = ur + (-m - r) / (2 * A);
-        uR = ur + (-m + r) / (2 * A);
-      }
+      // MEASURED, not derived. The physics is certain -- platform height and
+      // release velocity are one oscillator in quadrature -- but the geometry
+      // for how a change in vy redistributes between the two crossings was
+      // wrong, and confidently so.
+      //
+      // Re-cutting the parabola from a fixed release point predicted the effect
+      // landing almost entirely on R (-0.0654 per unit cos) and barely touching
+      // L (-0.0171). Driven against the offline rip of the game -- 65 shots,
+      // 14 committed per-flight fits, cos sampled across its whole range -- the
+      // truth is the other way round:
+      //
+      //     A vs cos   +0.0235 +-0.0435   r2 0.02   (predicted 0: confirmed)
+      //     L vs cos   -0.0949 +-0.0165   r2 0.73   (predicted -0.0171)
+      //     R vs cos   +0.0253 +-0.0132   r2 0.23   (predicted -0.0654)
+      //
+      // Curvature is untouched by the oscillator exactly as the physics says,
+      // which is the part of the model that holds. But the coupling shows up in
+      // L at 5.8 standard errors, while R has the wrong sign and does not clear
+      // two. Most likely because the tracked part of a flight pins the
+      // descending branch, leaving L to absorb the change -- R is measured, L
+      // is extrapolated.
+      //
+      // So the slopes are taken from the fits instead of from the geometry.
+      // R's is left in at its measured value despite being weak; dropping it
+      // would tilt the arc, and 0.0253 is small enough that being wrong about
+      // it costs little either way.
+      uL += -0.0949 * cosPhi * W;
+      uR += 0.0253 * cosPhi * W;
     }
     return { at: x => { const u = (x - px) * dir; return py + A * (u - uL) * (u - uR); },
              A, uL, uR, px, py, dir };
@@ -1084,30 +1138,50 @@
     }
 
     // ---- shot preview, anchored to the platform ----
-    let ghostMade = null;
+    let ghostMade = null, ghostRimY = null;
     // Drawn whenever a ball is in your hands — NOT gated on "no shot in flight".
     // After a miss both are true at once, and suppressing the preview then is
     // exactly when you need it to line up the next shot.
     if (cfg.ghost && plat && ready) {
       const dir = lastRim ? Math.sign(lastRim.x - plat.x) || 1 : 1;
-      // DISABLED pending a correct phase estimate -- see platCos(). Deriving
-      // cos from |sin| plus a direction-of-travel sign makes the arc JUMP at
-      // every turning point: measured on a real run, 34 sign flips and 17
-      // jumps of over 0.5 in cos, the worst going +0.946 -> -0.955 between two
-      // frames. That is the preview leaping between the strongest and weakest
-      // shot, which is worse than no correction at all.
+      // DISABLED AGAIN, on outcome data rather than on how the preview looks.
       //
-      // The reasoning that said this was safe -- "near the turning points cos
-      // is near zero, so a wrong sign costs little" -- was wrong. It holds only
-      // if y0 and amp are right, and they are not: taken from observed min/max
-      // they are outlier-sensitive, and the detector picks different rows of
-      // the platform as it slides. At the observed reversal sin was 0.288, so
-      // |cos| was 0.957 and the flip cost everything.
+      // Driven against the offline rip with the game's own score as ground
+      // truth, 49 shots paired from release to result:
+      //
+      //     GREEN  n=28    1/28 swish     19/28 scored (68%)
+      //     red    n=21    0/21 swish     14/21 scored (67%)
+      //
+      // Green means "this arc threads the hole". One of 28 did. And green
+      // scores no better than red, so the preview carries no information about
+      // whether the shot goes in -- which makes a second-order correction to it
+      // unmeasurable by construction.
+      //
+      // The reported feel matches: descending shots are worse (10/16 against
+      // 9/12 ascending, though that gap is only ~0.7 SE and proves nothing on
+      // its own), and ascending is off too when the rim is CLOSE -- small u,
+      // where the arc is dominated by uL, which is the term this correction
+      // moves hardest at up to 0.095 W. The most likely reading is that the
+      // measured L slope is too large to apply raw.
+      //
+      // Re-enabling it on a correlation with the per-flight fits was too weak a
+      // standard. Fits are the helper's own reading of the arc; whether shots
+      // go in is the thing that matters, and by that measure this does not
+      // help. The estimator and the measurements stay -- platCos is sound and
+      // the coupling is real -- but nothing here ships until the arc's error at
+      // the rim (a known mean of 54.7px, worst 117.5px, far wider than the
+      // hole) is brought down. A 70px correction cannot be judged against a
+      // 55px baseline error.
       const curve = shotCurve(plat.x, plat.y, dir, W, null);
       // Start the line directly above the platform rather than at the curve's
       // left crossing: that crossing is ~0.18 of a screen to the left, which
       // ran off the edge and made the arc appear to fly in from nowhere.
       ghostMade = drawCurve(curve.at, plat.x, dir, W, H, 'ghost');
+      // Where the predicted arc crosses the rim's x. This is the number that
+      // decides a make, and publishing it is what makes the error MEASURABLE
+      // rather than just "missed": against the ball's true height there, it
+      // gives a signed error with a direction and a size.
+      if (lastRim) ghostRimY = +curve.at(lastRim.x).toFixed(1);
       octx.save();
       const topY = curve.at(plat.x);
       octx.strokeStyle = 'rgba(255,122,112,.35)';             // tie the arc to the platform
@@ -1141,7 +1215,7 @@
 
     probe({
       frame, plat, rim: lastRim, rimWhy, blobs: cands.length, tracks: tracks.length,
-      flying, made, ready, ghostMade,
+      flying, made, ready, ghostMade, ghostRimY,
       cal: { a: cfg.shotA, l: cfg.shotL, r: cfg.shotR, seeded: cfg.calSeeded },
       // null until most of one platform swing has been seen; then the
       // quadrature term that sets how hard this particular shot leaves

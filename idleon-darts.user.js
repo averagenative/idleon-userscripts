@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         IdleOn Darts Helper
 // @namespace    nativerobot
-// @version      1.14
+// @version      1.15
 // @downloadURL https://raw.githubusercontent.com/averagenative/idleon-userscripts/main/idleon-darts.user.js
 // @updateURL   https://raw.githubusercontent.com/averagenative/idleon-userscripts/main/idleon-darts.user.js
 // @description  Draws the predicted dart path and where it lands on the board, wind included, for the Throwy Darts minigame
@@ -84,10 +84,11 @@
     // belongs to a later aim. That method cannot measure this and should not be
     // used to re-tune landN. Compare against the tracked flight instead.
     landN: 0,          // landing correction / height
-    // v6: magenta is NO LONGER gated. The colour was never a kind of wind, it is
-    // a strength tier — the game picks the arrow sprite as
+    // v6: magenta is NO LONGER gated, and v7 added red. The colour was never a
+    // kind of wind, it is a strength tier — the game picks the arrow sprite as
     //     mag < 10 ? DartWind0 : mag < 18 ? DartWind1 : DartWind2
-    // so cyan is simply every wind under 10 mph and magenta is 10-17. Every
+    // so cyan is every wind under 10 mph, magenta 10-17, red 18 and up. Red was
+    // not matched at all until v7 and read as 'none'; see windPx. Every
     // cyan logged here came in at 4/6/8/9 mph and every magenta at 10/11/13,
     // which is that boundary exactly. Gating magenta therefore threw away the
     // STRONGEST winds, modelling a 13 mph crosswind as still air.
@@ -416,15 +417,62 @@
   // Do not "calibrate" windK against this until the offset is anchored.
   // S is the native-resolution crop from grabWind, so the whole image IS the
   // window -- no sub-window arithmetic here any more.
+  // The three arrow sprites, and the one that used to be invisible.
+  //
+  //   DartWind0  cyan     hue 185-209   v .91-1.00   under 10 mph
+  //   DartWind1  magenta  hue 275-293   v 1.00       10-17 mph
+  //   DartWind2  red      hue   3- 36   v 1.00       18 mph and up
+  //
+  // Only the first two were ever matched, so an 18+ mph wind read as 'none' and
+  // was modelled as still air -- the strongest winds in the game, treated as no
+  // wind at all. Exactly the same shape of bug as the magenta gate.
+  //
+  // Red needs care the other two do not. It shares the HUD's own colours: the
+  // brown panel behind it is hue 0-32 saturation .30-.75, and the amber text and
+  // trim beside it run hue 33-44 -- so the arrow overlaps its background in BOTH
+  // hue and saturation. Hue cannot separate them at all: the arrow's hue is
+  // quantised, 73.5% of it below 36.3 and the remainder exactly at 36.3, right
+  // inside the amber.
+  //
+  // Brightness helps -- the arrow is v=1.00 throughout and the brown never gets
+  // past .72 -- but it is not enough on its own, because the amber reaches .96.
+  // What actually separates an arrow from HUD text is that an arrow is a solid
+  // blob; see the density gate in readWind.
+  //
+  // One asymmetry to know about: every darts recording reports 'none', which
+  // makes them a free test that red is not seen where it should not be. None of
+  // them contains an 18+ mph wind, so that red IS seen when it should be stays
+  // unverified until one turns up.
+  const windPx = (h, s, v) =>
+    s > 0.35 && v > 0.6 && (
+      (h > 165 && h < 215) ||            // cyan
+      (h > 270 && h < 335) ||            // magenta
+      (h < 45 && v > 0.85)               // red, 18 mph and up
+    );
+
   function readWind(S) {
     if (!S) return { key: 'none', deg: 0 };
     let pts = [];
     for (let y = 0; y < S.h; y++)
       for (let x = 0; x < S.w; x++) {
         const [h, s, v] = px(S, x, y);
-        if (s > 0.35 && v > 0.6 && ((h > 165 && h < 215) || (h > 270 && h < 335))) pts.push({ x, y, h });
+        if (windPx(h, s, v)) pts.push({ x, y, h });
       }
-    if (pts.length < 8) return { key: 'none', deg: 0 };
+    // An arrow is a BLOB, not a scattering. Requiring merely 8 pixels was
+    // enough while only cyan and magenta were matched -- neither colour appears
+    // in the HUD -- but red shares the HUD's own palette, and a handful of
+    // amber text pixels would otherwise be read as a wind.
+    //
+    // Density is what separates them, and it does not care about colour at all:
+    // the arrow sprites fill 4-8% of this window (480, 518 and 258 px of a
+    // window that is 0.12W x 0.10H), while the amber scatter that was being
+    // picked up ran 22-32 px, under half a percent. 2% sits in the gap with
+    // room on both sides.
+    //
+    // This replaces a v threshold that was being tuned against whichever frame
+    // was last looked at -- .85 let 70 false frames through, .97 still let 22
+    // through -- which is fitting a constant to noise rather than measuring.
+    if (pts.length < 0.02 * S.w * S.h) return { key: 'none', deg: 0 };
     // The window catches a few matching pixels hard against its left edge that
     // are not part of the arrow at all -- seen as a stray column many pixels
     // clear of the glyph in a captured mask. They are far enough out to drag
@@ -449,7 +497,12 @@
     let ux = Math.cos(th), uy = Math.sin(th);
     if (ux < 0) { ux = -ux; uy = -uy; }
     const hue = pts.reduce((p, c) => p + c.h, 0) / n;
-    return { key: hue < 240 ? 'cyan' : 'magenta', deg: Math.atan2(-uy, ux) * 180 / Math.PI };
+    // Staged, not a single split: red sits at ~20, which a `hue < 240` test
+    // would have called cyan. predict() no longer cares which name it gets --
+    // every detected wind is trusted since v6 -- but the status line says it
+    // and the probe records it, so it should be the truth.
+    const key = hue < 45 ? 'red' : hue < 240 ? 'cyan' : 'magenta';
+    return { key, deg: Math.atan2(-uy, ux) * 180 / Math.PI };
   }
 
 

@@ -156,37 +156,47 @@
     // ?? not ||: the hub is dockOrder 0, which || would treat as missing and
     // sort to the bottom of its own dock.
     const list = docks.slice().sort((a, b) => (a.def.dockOrder ?? 99) - (b.def.dockOrder ?? 99));
-    // A run wraps rather than running off the edge. Five panels do not fit
-    // across a half-width window, and with several expanded they do not fit
-    // down a short one either — and a panel past the edge is the exact trap the
-    // clamping in place() exists to avoid: unreachable, and unreachable means
-    // undraggable, so there is no way back to it.
+    // Packed into lanes, not shelved into rows. Shelving — starting every
+    // wrapped panel below the TALLEST one before it — leaves a hole: expanding
+    // the clicker pushed a collapsed Darts panel most of a screen down, past
+    // the empty space under the Suite panel where it plainly belonged.
     //
-    // `run` is the thickness of the current row (or column): the tallest panel
-    // in a row, the widest in a column, which is what the next one has to clear.
-    // The first panel of a run never wraps — if one panel is bigger than the
-    // whole viewport there is nowhere better for it, and wrapping on it would
-    // spin.
-    let x = DOCK_EDGE, y = DOCK_EDGE, run = 0;
+    // So panels run along the dock's edge until the viewport is used up, and
+    // that fixes a set of lanes: columns for a top dock, rows for a left one.
+    // Everything after goes into whichever lane is currently SHALLOWEST, so a
+    // short panel fills the gap beside a short neighbour instead of clearing
+    // the tall one. Lanes are disjoint along the edge, so nothing can overlap
+    // however the depths fall.
+    const lim  = vert ? window.innerHeight - DOCK_EDGE : window.innerWidth - DOCK_EDGE;
+    const lanes = [];            // { pos, size, edge } along / across / depth used
+    let cursor = DOCK_EDGE;
     for (const { ui } of list) {
-      if (ui.cfg.hidden) continue;          // hidden panels are a nub, not a slot
+      if (ui.cfg.hidden) continue;        // hidden panels are a nub, not a slot
       const p = ui.panel;
       p.style.right = 'auto';
-      // Measured before placing: the width is pinned by style.width so the
-      // height does not depend on where it ends up, and the wrap has to be
-      // decided before the position is written.
+      // Measured before placing: style.width pins the width, so the height does
+      // not depend on where it lands, and the lane has to be chosen first.
       const r = p.getBoundingClientRect();
-      if (vert) {
-        if (y > DOCK_EDGE && y + r.height > window.innerHeight - DOCK_EDGE) {
-          x += run + DOCK_GAP; y = DOCK_EDGE; run = 0;
-        }
-      } else if (x > DOCK_EDGE && x + r.width > window.innerWidth - DOCK_EDGE) {
-        y += run + DOCK_GAP; x = DOCK_EDGE; run = 0;
+      const along = vert ? r.height : r.width;    // extent along the dock edge
+      const deep  = vert ? r.width  : r.height;   // extent away from it
+      let lane;
+      if (cursor + along <= lim || !lanes.length) {
+        // Room for another lane — or this is the first panel, which opens one
+        // even if it is bigger than the viewport, because there is nowhere else.
+        lane = { pos: cursor, size: along, edge: DOCK_EDGE };
+        lanes.push(lane);
+        cursor += along + DOCK_GAP;
+      } else {
+        // Prefer the shallowest lane this actually FITS in; panels differ by up
+        // to ~30px and one placed in a narrower lane would hang over its
+        // neighbour. Fall back to the shallowest overall if none is wide enough.
+        const fits = lanes.filter(l => l.size >= along);
+        const pool = fits.length ? fits : lanes;
+        lane = pool.reduce((m, l) => (l.edge < m.edge ? l : m), pool[0]);
       }
-      p.style.left = x + 'px';
-      p.style.top = y + 'px';
-      if (vert) { y += r.height + DOCK_GAP; run = Math.max(run, r.width); }
-      else      { x += r.width + DOCK_GAP;  run = Math.max(run, r.height); }
+      p.style.left = (vert ? lane.edge : lane.pos) + 'px';
+      p.style.top  = (vert ? lane.pos  : lane.edge) + 'px';
+      lane.edge += deep + DOCK_GAP;
     }
   }
 

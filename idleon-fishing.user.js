@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         IdleOn Fishing Helper
 // @namespace    nativerobot
-// @version      2.4
+// @version      2.5
 // @downloadURL https://raw.githubusercontent.com/averagenative/idleon-userscripts/main/idleon-fishing.user.js
 // @updateURL   https://raw.githubusercontent.com/averagenative/idleon-userscripts/main/idleon-fishing.user.js
 // @description  Draws where your cast will land, plus fish and hazard markers, for the IdleOn fishing minigame
@@ -314,12 +314,30 @@
   const isEel   = (h, s, v) => h > 30 && h < 55 && s > 0.35 && v > 0.55;
   const isSquid = (h, s, v) => h > 255 && h <= 315 && s > 0.12 && v > 0.35;
   const isWhale = (h, s, v) => h > 228 && h < 258 && s > 0.22 && s < 0.6 && v > 0.3;
+  // How close the bobber has to land, per species, as a fraction of the lane.
+  // The game's catch test is
+  //     |fishX - bobberX| < 6 + SIZE[type]
+  // with SIZE = [6,6,9,10,12,13,17,17] in lane units and the 6 being the
+  // bobber's own half-width. Points identify the type: 1pt is type 2, 2pt is
+  // type 3, 3pt is type 4 and 5pt is type 6, so the tolerances come out at
+  // 15, 16, 18 and 23 lane units. The pufferfish is type 5, size 13, so 19.
+  //
+  // The lane is about 299.5 of those units across, and two independent routes
+  // agree on it: inverting the measured aim curve puts the lane ends at game x
+  // 11 and 311, and the game seeds fish between 40 and 295 with the bobber
+  // landing between 24 and 285 — all inside that span. Dividing by it turns a
+  // tolerance into a fraction of whatever the lane measures on screen, so this
+  // survives any window size, which raw pixels would not.
+  const LANE_UNITS = 299.5;
+  const tol = u => u / LANE_UNITS;
+
   const SPECIES = [
-    { name: 'FISH',  pts: 1, color: '#4ade80', test: isFish },
-    { name: 'EEL',   pts: 2, color: '#facc15', test: isEel },
-    { name: 'SQUID', pts: 3, color: '#e879f9', test: isSquid },
-    { name: 'WHALE', pts: 5, color: '#60a5fa', test: isWhale },
+    { name: 'FISH',  pts: 1, color: '#4ade80', test: isFish,  catchN: tol(15) },
+    { name: 'EEL',   pts: 2, color: '#facc15', test: isEel,   catchN: tol(16) },
+    { name: 'SQUID', pts: 3, color: '#e879f9', test: isSquid, catchN: tol(18) },
+    { name: 'WHALE', pts: 5, color: '#60a5fa', test: isWhale, catchN: tol(23) },
   ];
+  const HAZARD_N = tol(19);            // pufferfish, type 5, size 13
 
   // ---------- the lane ----------
   // The fishing lane is a long flat blue bar. Its longest horizontal run is both
@@ -916,6 +934,20 @@
       // Left of each catch, the power that would land the cast on it — the
       // number to release the gauge at. Recomputed every frame, so once the
       // fish start moving (later in a run) the label tracks them.
+      // The catch WINDOW, not just the spot: a bar as wide as the tolerance the
+      // game actually allows, so a near miss is visibly near rather than a
+      // mystery. A whale is half again as forgiving as a fish, which is not
+      // something the sprite sizes make obvious.
+      octx.save();
+      octx.lineWidth = 3; octx.globalAlpha = 0.45;
+      octx.shadowColor = 'rgba(0,0,0,.6)'; octx.shadowBlur = 2;
+      for (const f of fish) {
+        const r = (f.catchN || 0) * laneW;
+        if (r <= 0) continue;
+        octx.strokeStyle = f.color;
+        octx.beginPath(); octx.moveTo(f.x - r, f.y); octx.lineTo(f.x + r, f.y); octx.stroke();
+      }
+      octx.restore();
       for (const f of fish) {
         const p = invAim((f.x - laneX0) / laneW);
         drawLaneMark(f.x, f.y, f.color, `${f.name} +${f.pts}`, p !== null ? ((p * 100) | 0) + '%' : null);
@@ -927,8 +959,17 @@
       // other over a spot you actually want to hit. Hazards only cost you when
       // you land on a bare one, or miss everything; same W*0.02 as the marker.
       for (const z of haz)
-        if (!fish.some(f => Math.abs(f.x - z.x) < W * 0.02))
+        if (!fish.some(f => Math.abs(f.x - z.x) < W * 0.02)) {
+          // Same treatment for the pufferfish: its window is how far away you
+          // have to stay, and at 19 lane units it is wider than every catch
+          // except the whale.
+          const r = HAZARD_N * laneW;
+          octx.save();
+          octx.strokeStyle = '#f87171'; octx.lineWidth = 3; octx.globalAlpha = 0.45;
+          octx.beginPath(); octx.moveTo(z.x - r, z.y); octx.lineTo(z.x + r, z.y); octx.stroke();
+          octx.restore();
           drawLaneMark(z.x, z.y, '#f87171', 'AVOID');
+        }
     }
 
     // ---- power meter ----
@@ -951,7 +992,24 @@
         const p = invAim((f.x - laneX0) / laneW);
         if (p === null) continue;
         const tx = m.x * kx, ty = (m.bot - p * (m.bot - m.top)) * ky;
+        // A BAND, not a tick: the ends of the catch window mapped back through
+        // the aim curve give the range of gauge fills that still land on this
+        // fish. That is the release slack, and it is what you are actually
+        // aiming at — a tick says where perfect is and nothing about how much
+        // room there is around it. The curve is not linear, so the band is not
+        // symmetric about the tick, and it tightens the further out the fish is.
+        const r = (f.catchN || 0) * laneW;
+        const pLo = invAim((f.x - r - laneX0) / laneW);
+        const pHi = invAim((f.x + r - laneX0) / laneW);
         octx.strokeStyle = f.color;
+        if (pLo !== null && pHi !== null) {
+          const yLo = (m.bot - pLo * (m.bot - m.top)) * ky;
+          const yHi = (m.bot - pHi * (m.bot - m.top)) * ky;
+          octx.save();
+          octx.globalAlpha = 0.35; octx.lineWidth = 6;
+          octx.beginPath(); octx.moveTo(tx - 2, yLo); octx.lineTo(tx - 2, yHi); octx.stroke();
+          octx.restore();
+        }
         octx.beginPath(); octx.moveTo(tx - 12, ty); octx.lineTo(tx + 8, ty); octx.stroke();
       }
       octx.restore();

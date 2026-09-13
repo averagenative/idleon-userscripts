@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         IdleOn Helper Suite
 // @namespace    nativerobot
-// @version      1.37
+// @version      1.46
 // @downloadURL https://raw.githubusercontent.com/averagenative/idleon-userscripts/main/idleon-suite.user.js
 // @updateURL   https://raw.githubusercontent.com/averagenative/idleon-userscripts/main/idleon-suite.user.js
 // @description  All-in-one: autoclicker + Hoops, Fishing and Darts minigame helpers for Legends of IdleOn, each one individually switchable
@@ -156,37 +156,47 @@
     // ?? not ||: the hub is dockOrder 0, which || would treat as missing and
     // sort to the bottom of its own dock.
     const list = docks.slice().sort((a, b) => (a.def.dockOrder ?? 99) - (b.def.dockOrder ?? 99));
-    // A run wraps rather than running off the edge. Five panels do not fit
-    // across a half-width window, and with several expanded they do not fit
-    // down a short one either — and a panel past the edge is the exact trap the
-    // clamping in place() exists to avoid: unreachable, and unreachable means
-    // undraggable, so there is no way back to it.
+    // Packed into lanes, not shelved into rows. Shelving — starting every
+    // wrapped panel below the TALLEST one before it — leaves a hole: expanding
+    // the clicker pushed a collapsed Darts panel most of a screen down, past
+    // the empty space under the Suite panel where it plainly belonged.
     //
-    // `run` is the thickness of the current row (or column): the tallest panel
-    // in a row, the widest in a column, which is what the next one has to clear.
-    // The first panel of a run never wraps — if one panel is bigger than the
-    // whole viewport there is nowhere better for it, and wrapping on it would
-    // spin.
-    let x = DOCK_EDGE, y = DOCK_EDGE, run = 0;
+    // So panels run along the dock's edge until the viewport is used up, and
+    // that fixes a set of lanes: columns for a top dock, rows for a left one.
+    // Everything after goes into whichever lane is currently SHALLOWEST, so a
+    // short panel fills the gap beside a short neighbour instead of clearing
+    // the tall one. Lanes are disjoint along the edge, so nothing can overlap
+    // however the depths fall.
+    const lim  = vert ? window.innerHeight - DOCK_EDGE : window.innerWidth - DOCK_EDGE;
+    const lanes = [];            // { pos, size, edge } along / across / depth used
+    let cursor = DOCK_EDGE;
     for (const { ui } of list) {
-      if (ui.cfg.hidden) continue;          // hidden panels are a nub, not a slot
+      if (ui.cfg.hidden) continue;        // hidden panels are a nub, not a slot
       const p = ui.panel;
       p.style.right = 'auto';
-      // Measured before placing: the width is pinned by style.width so the
-      // height does not depend on where it ends up, and the wrap has to be
-      // decided before the position is written.
+      // Measured before placing: style.width pins the width, so the height does
+      // not depend on where it lands, and the lane has to be chosen first.
       const r = p.getBoundingClientRect();
-      if (vert) {
-        if (y > DOCK_EDGE && y + r.height > window.innerHeight - DOCK_EDGE) {
-          x += run + DOCK_GAP; y = DOCK_EDGE; run = 0;
-        }
-      } else if (x > DOCK_EDGE && x + r.width > window.innerWidth - DOCK_EDGE) {
-        y += run + DOCK_GAP; x = DOCK_EDGE; run = 0;
+      const along = vert ? r.height : r.width;    // extent along the dock edge
+      const deep  = vert ? r.width  : r.height;   // extent away from it
+      let lane;
+      if (cursor + along <= lim || !lanes.length) {
+        // Room for another lane — or this is the first panel, which opens one
+        // even if it is bigger than the viewport, because there is nowhere else.
+        lane = { pos: cursor, size: along, edge: DOCK_EDGE };
+        lanes.push(lane);
+        cursor += along + DOCK_GAP;
+      } else {
+        // Prefer the shallowest lane this actually FITS in; panels differ by up
+        // to ~30px and one placed in a narrower lane would hang over its
+        // neighbour. Fall back to the shallowest overall if none is wide enough.
+        const fits = lanes.filter(l => l.size >= along);
+        const pool = fits.length ? fits : lanes;
+        lane = pool.reduce((m, l) => (l.edge < m.edge ? l : m), pool[0]);
       }
-      p.style.left = x + 'px';
-      p.style.top = y + 'px';
-      if (vert) { y += r.height + DOCK_GAP; run = Math.max(run, r.width); }
-      else      { x += r.width + DOCK_GAP;  run = Math.max(run, r.height); }
+      p.style.left = (vert ? lane.edge : lane.pos) + 'px';
+      p.style.top  = (vert ? lane.pos  : lane.edge) + 'px';
+      lane.edge += deep + DOCK_GAP;
     }
   }
 
@@ -715,7 +725,7 @@
         debug: false,      // outline every detected blob
         // Calibration is stored as fractions of canvas size so it survives resizing
         // the window — the game scales its physics with the viewport.
-        calVer: 7,         // bump to throw away calibration learned by an older build
+        calVer: 8,         // bump to throw away calibration learned by an older build
         // The shot is a fixed parabola anchored to the PLATFORM, not to the ball in
         // your hands. Written as y = platY + A*(u - uL)*(u - R) where u is distance
         // right of the platform centre: A is curvature, uL and R are where the path
@@ -849,16 +859,15 @@
         // platform-relative, the arc meets platform height further out when the
         // platform sits lower, which is the observed sign. Settling it needs the
         // release instant, which nothing currently measures.
-        // v7: the seed is now derived rather than fitted. Curvature is g/2vx^2 with
-        // g = 0.069 and vx = 3.9 per 10ms step, which on the 960-wide design canvas
-        // is 0.069/(2*3.9^2)*960 = 2.177. The old 2.233 came off 13 tracked flights
-        // (sd 0.034, range 2.195..2.288) and sits just outside that, i.e. it is a
-        // systematic 2.6% rather than noise -- the same direction and size as the
-        // tracking bias found in the darts helper, where following a blob centroid
-        // through a rotating sprite inflated fitted accelerations. Self-calibration
-        // still runs and will pull toward whatever the tracker sees; this only
-        // changes where a fresh install starts.
-        shotA: 2.177,      // curvature x canvas width
+        // Back to 2.233, the value fitted from 13 tracked flights (sd 0.034, range
+        // 2.195..2.288). v7 replaced it with 2.177, derived as g/2vx^2 on the
+        // 960-wide design canvas, on the argument that the 2.6% gap was a
+        // systematic tracking bias rather than noise. Measuring the offline rip of
+        // the game settles it the other way: its own per-flight fits put curvature
+        // at 2.2205, which sits with the original fit and not with the derivation.
+        // Two independent measurements agreeing against one derivation means the
+        // derivation is what is wrong.
+        shotA: 2.233,      // curvature x canvas width
         shotL: -0.119,     // upward crossing, fraction of width left of the platform
         shotR: 0.547,      // landing range, fraction of width right of the platform
         calSeeded: true,
@@ -869,9 +878,9 @@
       // live flights the committed curvature ranged 1.865-2.941 around a true
       // 2.23 — a live config caught mid-session held 2.486. That is not stale, it
       // is contaminated, and averaging more shots into it does not wash it out.
-      if (cfg.calVer !== 7) {
-        cfg.calVer = 7; cfg.calSeeded = true;
-        cfg.shotA = 2.177; cfg.shotL = -0.119; cfg.shotR = 0.547;
+      if (cfg.calVer !== 8) {
+        cfg.calVer = 8; cfg.calSeeded = true;
+        cfg.shotA = 2.233; cfg.shotL = -0.119; cfg.shotR = 0.547;
       }
       delete cfg.grav; delete cfg.launch; delete cfg.launchN; delete cfg.gravN;
   });
@@ -1210,26 +1219,68 @@
       // one ~5s cycle that looks locally linear and correlates strongly, then fails
       // out of sample -- exactly the 43%-better-on-shotL, 3%-better-at-the-rim
       // split that was measured.
-      let platLo = Infinity, platHi = -Infinity, platHist = [];
+      // The phase is estimated AS A PHASE. The first attempt recovered cos from
+      // |sin| plus a direction-of-travel sign, which is discontinuous exactly where
+      // the platform spends most of its visible time: on a real run it flipped sign
+      // 34 times and jumped over 0.5 in cos 17 times, the worst going +0.946 to
+      // -0.955 across one frame as the platform reversed. The preview leapt between
+      // the strongest and weakest shot, which is worse than no correction. See
+      // 57faab9.
+      //
+      // The period is known exactly, so nothing has to be guessed: G16[0] gains 1.3
+      // every 20ms and phi = 1.1*G16[0] degrees, giving 71.5 deg/s and a 5.035s
+      // period. With w fixed,
+      //     platY(t) = y0 + A*sin(wt) + B*cos(wt)
+      // is linear least squares in (y0, A, B) over a window of observations, and
+      //     amp   = hypot(A, B)
+      //     cos(phi) = (A*cos(wt) - B*sin(wt)) / amp
+      // falls straight out, continuous everywhere and with no sign to choose.
+      const PLAT_W = 2 * Math.PI / 5.035;      // rad/s, from the game's own clock
+      let platHist = [];
       function platCos(H, t) {
         if (!plat) return null;
-        platHist.push({ t, y: plat.y });
-        while (platHist.length > 1 && t - platHist[0].t > 400) platHist.shift();
-        if (plat.y < platLo) platLo = plat.y;
-        if (plat.y > platHi) platHi = plat.y;
-        // The full swing is 220 of 540 on the design canvas. Until most of one has
-        // been seen the midpoint is a guess, and a wrong midpoint is worse than no
-        // correction at all.
-        if (platHi - platLo < (200 / 540) * H) return null;
-        const y0 = (platLo + platHi) / 2, amp = (platHi - platLo) / 2;
-        const sn = Math.max(-1, Math.min(1, (plat.y - y0) / amp));
-        if (platHist.length < 3) return null;
-        const dy = plat.y - platHist[0].y;
-        // Near the turning points the direction cannot be read -- but that is also
-        // where cos is near zero, so falling back to no correction there costs
-        // almost nothing. The failure is self-limiting.
-        if (Math.abs(dy) < 0.5) return null;
-        return Math.sign(dy) * Math.sqrt(Math.max(0, 1 - sn * sn));
+        platHist.push({ t: t / 1000, y: plat.y });
+        // Just over half a period. Less than that and sin and cos are too alike
+        // across the window to be told apart, which makes A and B swap freely.
+        while (platHist.length > 1 && t / 1000 - platHist[0].t > 3.0) platHist.shift();
+        const n = platHist.length;
+        if (n < 20 || t / 1000 - platHist[0].t < 2.0) return null;
+        // normal equations for y = c0 + c1*sin(wt) + c2*cos(wt)
+        let Ss = 0, Sc = 0, Sss = 0, Scc = 0, Ssc = 0, Sy = 0, Sys = 0, Syc = 0;
+        for (const q of platHist) {
+          const sn = Math.sin(PLAT_W * q.t), cs = Math.cos(PLAT_W * q.t);
+          Ss += sn; Sc += cs; Sss += sn * sn; Scc += cs * cs; Ssc += sn * cs;
+          Sy += q.y; Sys += q.y * sn; Syc += q.y * cs;
+        }
+        const M = [[n, Ss, Sc], [Ss, Sss, Ssc], [Sc, Ssc, Scc]], V = [Sy, Sys, Syc];
+        for (let i = 0; i < 3; i++) {
+          let piv = M[i][i];
+          if (Math.abs(piv) < 1e-9) return null;
+          for (let k = i + 1; k < 3; k++) {
+            const f = M[k][i] / piv;
+            for (let j = i; j < 3; j++) M[k][j] -= f * M[i][j];
+            V[k] -= f * V[i];
+          }
+        }
+        if (Math.abs(M[2][2]) < 1e-9) return null;
+        const c2 = V[2] / M[2][2];
+        const c1 = (V[1] - M[1][2] * c2) / M[1][1];
+        const c0 = (V[0] - M[0][1] * c1 - M[0][2] * c2) / M[0][0];
+        const amp = Math.hypot(c1, c2);
+        // The real swing is 110 of 540 on the design canvas. An amplitude far off
+        // that means the fit has latched onto drift or noise rather than the
+        // oscillation, and a wrong phase is worse than no correction at all.
+        const want = (110 / 540) * H;
+        if (amp < want * 0.5 || amp > want * 1.8) return null;
+        // and it has to actually describe the samples
+        let ss = 0;
+        for (const q of platHist) {
+          const pred = c0 + c1 * Math.sin(PLAT_W * q.t) + c2 * Math.cos(PLAT_W * q.t);
+          ss += (q.y - pred) * (q.y - pred);
+        }
+        if (Math.sqrt(ss / n) > amp * 0.25) return null;
+        const wt = PLAT_W * (t / 1000);
+        return Math.max(-1, Math.min(1, (c1 * Math.cos(wt) - c2 * Math.sin(wt)) / amp));
       }
       let holdT = -1e9;              // last time a ball was seen in your hands
       let flightPlat = null;         // where the platform was when this shot left
@@ -1275,21 +1326,34 @@
         const A = cfg.shotA / W;
         let uL = cfg.shotL * W, uR = cfg.shotR * W;
         if (cosPhi != null) {
-          // Re-cut the parabola for the vy this particular throw will actually get.
-          // Curvature is g/2vx^2 and cannot move -- neither g nor vx depends on the
-          // oscillator -- so the only thing that changes is the launch slope, by
-          // d(vy/vx) = 0.7*cos/3.9. The release point is left exactly where the
-          // shipped constants put it, which means cosPhi 0 reproduces the old curve
-          // to the pixel and this can only add the variation that was missing.
-          const ur = RELX * W;
-          const yr = A * (ur - uL) * (ur - uR);
-          const m = A * (2 * ur - uL - uR) + (0.7 * cosPhi) / 3.9;
-          const disc = m * m - 4 * A * yr;
-          if (disc > 0) {
-            const r = Math.sqrt(disc);
-            uL = ur + (-m - r) / (2 * A);
-            uR = ur + (-m + r) / (2 * A);
-          }
+          // MEASURED, not derived. The physics is certain -- platform height and
+          // release velocity are one oscillator in quadrature -- but the geometry
+          // for how a change in vy redistributes between the two crossings was
+          // wrong, and confidently so.
+          //
+          // Re-cutting the parabola from a fixed release point predicted the effect
+          // landing almost entirely on R (-0.0654 per unit cos) and barely touching
+          // L (-0.0171). Driven against the offline rip of the game -- 65 shots,
+          // 14 committed per-flight fits, cos sampled across its whole range -- the
+          // truth is the other way round:
+          //
+          //     A vs cos   +0.0235 +-0.0435   r2 0.02   (predicted 0: confirmed)
+          //     L vs cos   -0.0949 +-0.0165   r2 0.73   (predicted -0.0171)
+          //     R vs cos   +0.0253 +-0.0132   r2 0.23   (predicted -0.0654)
+          //
+          // Curvature is untouched by the oscillator exactly as the physics says,
+          // which is the part of the model that holds. But the coupling shows up in
+          // L at 5.8 standard errors, while R has the wrong sign and does not clear
+          // two. Most likely because the tracked part of a flight pins the
+          // descending branch, leaving L to absorb the change -- R is measured, L
+          // is extrapolated.
+          //
+          // So the slopes are taken from the fits instead of from the geometry.
+          // R's is left in at its measured value despite being weak; dropping it
+          // would tilt the arc, and 0.0253 is small enough that being wrong about
+          // it costs little either way.
+          uL += -0.0949 * cosPhi * W;
+          uR += 0.0253 * cosPhi * W;
         }
         return { at: x => { const u = (x - px) * dir; return py + A * (u - uL) * (u - uR); },
                  A, uL, uR, px, py, dir };
@@ -1640,30 +1704,50 @@
         }
 
         // ---- shot preview, anchored to the platform ----
-        let ghostMade = null;
+        let ghostMade = null, ghostRimY = null;
         // Drawn whenever a ball is in your hands — NOT gated on "no shot in flight".
         // After a miss both are true at once, and suppressing the preview then is
         // exactly when you need it to line up the next shot.
         if (cfg.ghost && plat && ready) {
           const dir = lastRim ? Math.sign(lastRim.x - plat.x) || 1 : 1;
-          // DISABLED pending a correct phase estimate -- see platCos(). Deriving
-          // cos from |sin| plus a direction-of-travel sign makes the arc JUMP at
-          // every turning point: measured on a real run, 34 sign flips and 17
-          // jumps of over 0.5 in cos, the worst going +0.946 -> -0.955 between two
-          // frames. That is the preview leaping between the strongest and weakest
-          // shot, which is worse than no correction at all.
+          // DISABLED AGAIN, on outcome data rather than on how the preview looks.
           //
-          // The reasoning that said this was safe -- "near the turning points cos
-          // is near zero, so a wrong sign costs little" -- was wrong. It holds only
-          // if y0 and amp are right, and they are not: taken from observed min/max
-          // they are outlier-sensitive, and the detector picks different rows of
-          // the platform as it slides. At the observed reversal sin was 0.288, so
-          // |cos| was 0.957 and the flip cost everything.
+          // Driven against the offline rip with the game's own score as ground
+          // truth, 49 shots paired from release to result:
+          //
+          //     GREEN  n=28    1/28 swish     19/28 scored (68%)
+          //     red    n=21    0/21 swish     14/21 scored (67%)
+          //
+          // Green means "this arc threads the hole". One of 28 did. And green
+          // scores no better than red, so the preview carries no information about
+          // whether the shot goes in -- which makes a second-order correction to it
+          // unmeasurable by construction.
+          //
+          // The reported feel matches: descending shots are worse (10/16 against
+          // 9/12 ascending, though that gap is only ~0.7 SE and proves nothing on
+          // its own), and ascending is off too when the rim is CLOSE -- small u,
+          // where the arc is dominated by uL, which is the term this correction
+          // moves hardest at up to 0.095 W. The most likely reading is that the
+          // measured L slope is too large to apply raw.
+          //
+          // Re-enabling it on a correlation with the per-flight fits was too weak a
+          // standard. Fits are the helper's own reading of the arc; whether shots
+          // go in is the thing that matters, and by that measure this does not
+          // help. The estimator and the measurements stay -- platCos is sound and
+          // the coupling is real -- but nothing here ships until the arc's error at
+          // the rim (a known mean of 54.7px, worst 117.5px, far wider than the
+          // hole) is brought down. A 70px correction cannot be judged against a
+          // 55px baseline error.
           const curve = shotCurve(plat.x, plat.y, dir, W, null);
           // Start the line directly above the platform rather than at the curve's
           // left crossing: that crossing is ~0.18 of a screen to the left, which
           // ran off the edge and made the arc appear to fly in from nowhere.
           ghostMade = drawCurve(curve.at, plat.x, dir, W, H, 'ghost');
+          // Where the predicted arc crosses the rim's x. This is the number that
+          // decides a make, and publishing it is what makes the error MEASURABLE
+          // rather than just "missed": against the ball's true height there, it
+          // gives a signed error with a direction and a size.
+          if (lastRim) ghostRimY = +curve.at(lastRim.x).toFixed(1);
           octx.save();
           const topY = curve.at(plat.x);
           octx.strokeStyle = 'rgba(255,122,112,.35)';             // tie the arc to the platform
@@ -1697,7 +1781,7 @@
 
         probe({
           frame, plat, rim: lastRim, rimWhy, blobs: cands.length, tracks: tracks.length,
-          flying, made, ready, ghostMade,
+          flying, made, ready, ghostMade, ghostRimY,
           cal: { a: cfg.shotA, l: cfg.shotL, r: cfg.shotR, seeded: cfg.calSeeded },
           // null until most of one platform swing has been seen; then the
           // quadrature term that sets how hard this particular shot leaves
@@ -1956,12 +2040,30 @@
       const isEel   = (h, s, v) => h > 30 && h < 55 && s > 0.35 && v > 0.55;
       const isSquid = (h, s, v) => h > 255 && h <= 315 && s > 0.12 && v > 0.35;
       const isWhale = (h, s, v) => h > 228 && h < 258 && s > 0.22 && s < 0.6 && v > 0.3;
+      // How close the bobber has to land, per species, as a fraction of the lane.
+      // The game's catch test is
+      //     |fishX - bobberX| < 6 + SIZE[type]
+      // with SIZE = [6,6,9,10,12,13,17,17] in lane units and the 6 being the
+      // bobber's own half-width. Points identify the type: 1pt is type 2, 2pt is
+      // type 3, 3pt is type 4 and 5pt is type 6, so the tolerances come out at
+      // 15, 16, 18 and 23 lane units. The pufferfish is type 5, size 13, so 19.
+      //
+      // The lane is about 299.5 of those units across, and two independent routes
+      // agree on it: inverting the measured aim curve puts the lane ends at game x
+      // 11 and 311, and the game seeds fish between 40 and 295 with the bobber
+      // landing between 24 and 285 — all inside that span. Dividing by it turns a
+      // tolerance into a fraction of whatever the lane measures on screen, so this
+      // survives any window size, which raw pixels would not.
+      const LANE_UNITS = 299.5;
+      const tol = u => u / LANE_UNITS;
+
       const SPECIES = [
-        { name: 'FISH',  pts: 1, color: '#4ade80', test: isFish },
-        { name: 'EEL',   pts: 2, color: '#facc15', test: isEel },
-        { name: 'SQUID', pts: 3, color: '#e879f9', test: isSquid },
-        { name: 'WHALE', pts: 5, color: '#60a5fa', test: isWhale },
+        { name: 'FISH',  pts: 1, color: '#4ade80', test: isFish,  catchN: tol(15) },
+        { name: 'EEL',   pts: 2, color: '#facc15', test: isEel,   catchN: tol(16) },
+        { name: 'SQUID', pts: 3, color: '#e879f9', test: isSquid, catchN: tol(18) },
+        { name: 'WHALE', pts: 5, color: '#60a5fa', test: isWhale, catchN: tol(23) },
       ];
+      const HAZARD_N = tol(19);            // pufferfish, type 5, size 13
 
       // ---------- the lane ----------
       // The fishing lane is a long flat blue bar. Its longest horizontal run is both
@@ -2557,6 +2659,20 @@
           // Left of each catch, the power that would land the cast on it — the
           // number to release the gauge at. Recomputed every frame, so once the
           // fish start moving (later in a run) the label tracks them.
+          // The catch WINDOW, not just the spot: a bar as wide as the tolerance the
+          // game actually allows, so a near miss is visibly near rather than a
+          // mystery. A whale is half again as forgiving as a fish, which is not
+          // something the sprite sizes make obvious.
+          octx.save();
+          octx.lineWidth = 3; octx.globalAlpha = 0.45;
+          octx.shadowColor = 'rgba(0,0,0,.6)'; octx.shadowBlur = 2;
+          for (const f of fish) {
+            const r = (f.catchN || 0) * laneW;
+            if (r <= 0) continue;
+            octx.strokeStyle = f.color;
+            octx.beginPath(); octx.moveTo(f.x - r, f.y); octx.lineTo(f.x + r, f.y); octx.stroke();
+          }
+          octx.restore();
           for (const f of fish) {
             const p = invAim((f.x - laneX0) / laneW);
             drawLaneMark(f.x, f.y, f.color, `${f.name} +${f.pts}`, p !== null ? ((p * 100) | 0) + '%' : null);
@@ -2568,8 +2684,17 @@
           // other over a spot you actually want to hit. Hazards only cost you when
           // you land on a bare one, or miss everything; same W*0.02 as the marker.
           for (const z of haz)
-            if (!fish.some(f => Math.abs(f.x - z.x) < W * 0.02))
+            if (!fish.some(f => Math.abs(f.x - z.x) < W * 0.02)) {
+              // Same treatment for the pufferfish: its window is how far away you
+              // have to stay, and at 19 lane units it is wider than every catch
+              // except the whale.
+              const r = HAZARD_N * laneW;
+              octx.save();
+              octx.strokeStyle = '#f87171'; octx.lineWidth = 3; octx.globalAlpha = 0.45;
+              octx.beginPath(); octx.moveTo(z.x - r, z.y); octx.lineTo(z.x + r, z.y); octx.stroke();
+              octx.restore();
               drawLaneMark(z.x, z.y, '#f87171', 'AVOID');
+            }
         }
 
         // ---- power meter ----
@@ -2592,7 +2717,24 @@
             const p = invAim((f.x - laneX0) / laneW);
             if (p === null) continue;
             const tx = m.x * kx, ty = (m.bot - p * (m.bot - m.top)) * ky;
+            // A BAND, not a tick: the ends of the catch window mapped back through
+            // the aim curve give the range of gauge fills that still land on this
+            // fish. That is the release slack, and it is what you are actually
+            // aiming at — a tick says where perfect is and nothing about how much
+            // room there is around it. The curve is not linear, so the band is not
+            // symmetric about the tick, and it tightens the further out the fish is.
+            const r = (f.catchN || 0) * laneW;
+            const pLo = invAim((f.x - r - laneX0) / laneW);
+            const pHi = invAim((f.x + r - laneX0) / laneW);
             octx.strokeStyle = f.color;
+            if (pLo !== null && pHi !== null) {
+              const yLo = (m.bot - pLo * (m.bot - m.top)) * ky;
+              const yHi = (m.bot - pHi * (m.bot - m.top)) * ky;
+              octx.save();
+              octx.globalAlpha = 0.35; octx.lineWidth = 6;
+              octx.beginPath(); octx.moveTo(tx - 2, yLo); octx.lineTo(tx - 2, yHi); octx.stroke();
+              octx.restore();
+            }
             octx.beginPath(); octx.moveTo(tx - 12, ty); octx.lineTo(tx + 8, ty); octx.stroke();
           }
           octx.restore();
@@ -2841,10 +2983,11 @@
         // belongs to a later aim. That method cannot measure this and should not be
         // used to re-tune landN. Compare against the tracked flight instead.
         landN: 0,          // landing correction / height
-        // v6: magenta is NO LONGER gated. The colour was never a kind of wind, it is
-        // a strength tier — the game picks the arrow sprite as
+        // v6: magenta is NO LONGER gated, and v7 added red. The colour was never a
+        // kind of wind, it is a strength tier — the game picks the arrow sprite as
         //     mag < 10 ? DartWind0 : mag < 18 ? DartWind1 : DartWind2
-        // so cyan is simply every wind under 10 mph and magenta is 10-17. Every
+        // so cyan is every wind under 10 mph, magenta 10-17, red 18 and up. Red was
+        // not matched at all until v7 and read as 'none'; see windPx. Every
         // cyan logged here came in at 4/6/8/9 mph and every magenta at 10/11/13,
         // which is that boundary exactly. Gating magenta therefore threw away the
         // STRONGEST winds, modelling a 13 mph crosswind as still air.
@@ -3099,15 +3242,62 @@
       // Do not "calibrate" windK against this until the offset is anchored.
       // S is the native-resolution crop from grabWind, so the whole image IS the
       // window -- no sub-window arithmetic here any more.
+      // The three arrow sprites, and the one that used to be invisible.
+      //
+      //   DartWind0  cyan     hue 185-209   v .91-1.00   under 10 mph
+      //   DartWind1  magenta  hue 275-293   v 1.00       10-17 mph
+      //   DartWind2  red      hue   3- 36   v 1.00       18 mph and up
+      //
+      // Only the first two were ever matched, so an 18+ mph wind read as 'none' and
+      // was modelled as still air -- the strongest winds in the game, treated as no
+      // wind at all. Exactly the same shape of bug as the magenta gate.
+      //
+      // Red needs care the other two do not. It shares the HUD's own colours: the
+      // brown panel behind it is hue 0-32 saturation .30-.75, and the amber text and
+      // trim beside it run hue 33-44 -- so the arrow overlaps its background in BOTH
+      // hue and saturation. Hue cannot separate them at all: the arrow's hue is
+      // quantised, 73.5% of it below 36.3 and the remainder exactly at 36.3, right
+      // inside the amber.
+      //
+      // Brightness helps -- the arrow is v=1.00 throughout and the brown never gets
+      // past .72 -- but it is not enough on its own, because the amber reaches .96.
+      // What actually separates an arrow from HUD text is that an arrow is a solid
+      // blob; see the density gate in readWind.
+      //
+      // One asymmetry to know about: every darts recording reports 'none', which
+      // makes them a free test that red is not seen where it should not be. None of
+      // them contains an 18+ mph wind, so that red IS seen when it should be stays
+      // unverified until one turns up.
+      const windPx = (h, s, v) =>
+        s > 0.35 && v > 0.6 && (
+          (h > 165 && h < 215) ||            // cyan
+          (h > 270 && h < 335) ||            // magenta
+          (h < 45 && v > 0.85)               // red, 18 mph and up
+        );
+
       function readWind(S) {
         if (!S) return { key: 'none', deg: 0 };
         let pts = [];
         for (let y = 0; y < S.h; y++)
           for (let x = 0; x < S.w; x++) {
             const [h, s, v] = px(S, x, y);
-            if (s > 0.35 && v > 0.6 && ((h > 165 && h < 215) || (h > 270 && h < 335))) pts.push({ x, y, h });
+            if (windPx(h, s, v)) pts.push({ x, y, h });
           }
-        if (pts.length < 8) return { key: 'none', deg: 0 };
+        // An arrow is a BLOB, not a scattering. Requiring merely 8 pixels was
+        // enough while only cyan and magenta were matched -- neither colour appears
+        // in the HUD -- but red shares the HUD's own palette, and a handful of
+        // amber text pixels would otherwise be read as a wind.
+        //
+        // Density is what separates them, and it does not care about colour at all:
+        // the arrow sprites fill 4-8% of this window (480, 518 and 258 px of a
+        // window that is 0.12W x 0.10H), while the amber scatter that was being
+        // picked up ran 22-32 px, under half a percent. 2% sits in the gap with
+        // room on both sides.
+        //
+        // This replaces a v threshold that was being tuned against whichever frame
+        // was last looked at -- .85 let 70 false frames through, .97 still let 22
+        // through -- which is fitting a constant to noise rather than measuring.
+        if (pts.length < 0.02 * S.w * S.h) return { key: 'none', deg: 0 };
         // The window catches a few matching pixels hard against its left edge that
         // are not part of the arrow at all -- seen as a stray column many pixels
         // clear of the glyph in a captured mask. They are far enough out to drag
@@ -3132,7 +3322,12 @@
         let ux = Math.cos(th), uy = Math.sin(th);
         if (ux < 0) { ux = -ux; uy = -uy; }
         const hue = pts.reduce((p, c) => p + c.h, 0) / n;
-        return { key: hue < 240 ? 'cyan' : 'magenta', deg: Math.atan2(-uy, ux) * 180 / Math.PI };
+        // Staged, not a single split: red sits at ~20, which a `hue < 240` test
+        // would have called cyan. predict() no longer cares which name it gets --
+        // every detected wind is trusted since v6 -- but the status line says it
+        // and the probe records it, so it should be the truth.
+        const key = hue < 45 ? 'red' : hue < 240 ? 'cyan' : 'magenta';
+        return { key, deg: Math.atan2(-uy, ux) * 180 / Math.PI };
       }
 
       // ---------- reading the wind speed ----------
