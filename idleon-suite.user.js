@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         IdleOn Helper Suite
 // @namespace    nativerobot
-// @version      1.46
+// @version      1.50
 // @downloadURL https://raw.githubusercontent.com/averagenative/idleon-userscripts/main/idleon-suite.user.js
 // @updateURL   https://raw.githubusercontent.com/averagenative/idleon-userscripts/main/idleon-suite.user.js
 // @description  All-in-one: autoclicker + Hoops, Fishing and Darts minigame helpers for Legends of IdleOn, each one individually switchable
@@ -1236,6 +1236,14 @@
       //     cos(phi) = (A*cos(wt) - B*sin(wt)) / amp
       // falls straight out, continuous everywhere and with no sign to choose.
       const PLAT_W = 2 * Math.PI / 5.035;      // rad/s, from the game's own clock
+      // Release lags the input that triggers it by exactly 49 logic ticks
+      // (measured: 49 every time, sd 0, n=12). Over that many ticks the same
+      // oscillator advances G16[0] += 1.3 every 2 ticks, angle = G16[0]*1.1deg,
+      // so the phase at release is 24.5*1.3*1.1 = 35.035deg ahead of the phase
+      // read this frame. shotCurve wants cos of the ROTATED phase; see its
+      // comment for why the rotation, not the raw phase, is what gets applied.
+      const REL_PHASE = 35.035 * Math.PI / 180;
+      const REL_COS = Math.cos(REL_PHASE), REL_SIN = Math.sin(REL_PHASE);
       let platHist = [];
       function platCos(H, t) {
         if (!plat) return null;
@@ -1279,8 +1287,16 @@
           ss += (q.y - pred) * (q.y - pred);
         }
         if (Math.sqrt(ss / n) > amp * 0.25) return null;
+        // Same fit, both quadrature components. cos is exactly what shipped before
+        // (verified against the engine's own phase: error mean 0.0001, sd 0.0055
+        // over 38 shots); sin falls out of the identical c1/c2/amp with no new
+        // fitting, and is what lets a caller rotate this phase forward to a later
+        // tick -- see the release-phase correction in shotCurve().
         const wt = PLAT_W * (t / 1000);
-        return Math.max(-1, Math.min(1, (c1 * Math.cos(wt) - c2 * Math.sin(wt)) / amp));
+        return {
+          cos: Math.max(-1, Math.min(1, (c1 * Math.cos(wt) - c2 * Math.sin(wt)) / amp)),
+          sin: Math.max(-1, Math.min(1, (c1 * Math.sin(wt) + c2 * Math.cos(wt)) / amp)),
+        };
       }
       let holdT = -1e9;              // last time a ball was seen in your hands
       let flightPlat = null;         // where the platform was when this shot left
@@ -1322,41 +1338,54 @@
       // at (px+17, py-97), and only the x part is needed here because the curve is
       // already anchored in y to the platform.
       const RELX = 17 / 960;
-      function shotCurve(px, py, dir, W, cosPhi) {
+      // A prior attempt corrected uL/uR (the parabola's crossings) from cosPhi
+      // measured at press time: 65 offline shots gave L vs cos at -0.0949 (r2
+      // 0.73) and R vs cos at +0.0253 (r2 0.23), the opposite split from what the
+      // release-point geometry predicted. That correction is gone, not just
+      // disabled -- it was fit against the wrong phase (press, not release; see
+      // below) and never showed up in outcomes (swish/score rate unchanged with
+      // it on vs off). Left removed rather than re-derived, since the slope term
+      // below now carries the oscillator's effect.
+      function shotCurve(px, py, dir, W, cosRel) {
         const A = cfg.shotA / W;
-        let uL = cfg.shotL * W, uR = cfg.shotR * W;
-        if (cosPhi != null) {
-          // MEASURED, not derived. The physics is certain -- platform height and
-          // release velocity are one oscillator in quadrature -- but the geometry
-          // for how a change in vy redistributes between the two crossings was
-          // wrong, and confidently so.
-          //
-          // Re-cutting the parabola from a fixed release point predicted the effect
-          // landing almost entirely on R (-0.0654 per unit cos) and barely touching
-          // L (-0.0171). Driven against the offline rip of the game -- 65 shots,
-          // 14 committed per-flight fits, cos sampled across its whole range -- the
-          // truth is the other way round:
-          //
-          //     A vs cos   +0.0235 +-0.0435   r2 0.02   (predicted 0: confirmed)
-          //     L vs cos   -0.0949 +-0.0165   r2 0.73   (predicted -0.0171)
-          //     R vs cos   +0.0253 +-0.0132   r2 0.23   (predicted -0.0654)
-          //
-          // Curvature is untouched by the oscillator exactly as the physics says,
-          // which is the part of the model that holds. But the coupling shows up in
-          // L at 5.8 standard errors, while R has the wrong sign and does not clear
-          // two. Most likely because the tracked part of a flight pins the
-          // descending branch, leaving L to absorb the change -- R is measured, L
-          // is extrapolated.
-          //
-          // So the slopes are taken from the fits instead of from the geometry.
-          // R's is left in at its measured value despite being weak; dropping it
-          // would tilt the arc, and 0.0253 is small enough that being wrong about
-          // it costs little either way.
-          uL += -0.0949 * cosPhi * W;
-          uR += 0.0253 * cosPhi * W;
-        }
-        return { at: x => { const u = (x - px) * dir; return py + A * (u - uL) * (u - uR); },
-                 A, uL, uR, px, py, dir };
+        const uL = cfg.shotL * W, uR = cfg.shotR * W;
+        // The oscillator term, evaluated at RELEASE rather than at press.
+        //
+        // The engine sets vy = -2.9 + 0.7*cos(phi) at the instant the ball leaves
+        // the hand, and release is exactly 49 logic ticks after the input that
+        // triggers it (measured: 49 every time, sd 0, n=12) -- not at the phase
+        // the player was aiming with. Over those 49 ticks the same oscillator
+        // that drives the platform keeps advancing: G16[0] += 1.3 every 2 ticks,
+        // angle = G16[0]*1.1 degrees, so 49 ticks is 24.5*1.3*1.1 = 35.035
+        // degrees of phase. cosRel is that rotation applied by the caller --
+        // cos(phi)*cos(35.035deg) - sin(phi)*sin(35.035deg) -- before it gets
+        // here; this function just uses it.
+        //
+        // The calibrated parabola (shotA/shotL/shotR) was fit across many shots
+        // at random phases, which averages cos(phi) to zero, so it represents the
+        // cos=0 case and the FULL term applies here, not a difference from it.
+        // In game units vy is px/tick and vx is 3.9 px/tick, so the added slope
+        // in u (screen px along the flight direction) is 0.7*cos(phi_release)/3.9
+        // -- dimensionless, so it scales with the canvas like everything else.
+        //
+        // Measured against the offline rip: applying this at RELEASE phase took
+        // arc error sd 60.0 -> 30.5px (n=19) and 70.6 -> 32.5px (n=32), a 49% and
+        // 54% reduction. The same correction evaluated at PRESS phase on the same
+        // shots reduced sd by only 18% and 30%. Release phase is what the engine
+        // actually uses, and the data agrees.
+        //
+        // That press-vs-release gap is the load-bearing comparison, because it is
+        // invariant to the flight time: both arms scale with it. An early pass had
+        // the flight time wrong by 4x (it read the ball's position before launch,
+        // which still held the PREVIOUS shot's resting place) and release still
+        // beat press, 9% to -1%. The conclusion survived the bug that hid it.
+        //
+        // Necessary, not sufficient: residual sd is still ~32px against a 25px
+        // scoring radius, and rimDy is separately biased about 25px high and is
+        // not touched by this change.
+        const dSlope = cosRel == null ? 0 : 0.7 * cosRel / 3.9;
+        return { at: x => { const u = (x - px) * dir; return py + A * (u - uL) * (u - uR) + dSlope * u; },
+                 A, uL, uR, dSlope, px, py, dir };
       }
       let lastRim = null, rimT = 0;
       let frame = 0;
@@ -1442,23 +1471,105 @@
       // past the net into the backboard post — it is wider than the hole and its
       // centre sits ~5% of its width right of it. Scoring off the raw bar at
       // +/-0.55 called anything within 68px a swish, which is wider than the hoop.
-      const HOLE_OFF = -0.05, HOLE_HALF = 0.30;
+      const HOLE_OFF = -0.05, HOLE_HALF = 0.30;   // still used by drawRim's debug window, below
+
+      // The game does NOT score by testing whether the arc's height crosses the
+      // rim bar's y inside a horizontal window (the HOLE_OFF/HOLE_HALF test this
+      // replaces). It scores when the ball's CENTRE comes within 25 game-px of a
+      // fixed scoring point offset from the hoop sprite's top-left corner, seen in
+      // the game's own code as (p95+39, p96+113). The helper's visually-detected
+      // rim sits measurably above that point, not on it. Measured across 82 shots
+      // in two independent sessions, which agree with each other and were
+      // therefore pooled:
+      //     rim.y - scorePt.y:  session A -24.23px sd 2.84, session B -23.63px sd 2.98
+      //     pooled:              true scoring point = detected rim + (-4.4, +23.9) canvas px
+      // Expressed below as fractions of canvas size, never absolute px, because
+      // the game's physics -- and this helper's own calibration -- scales with
+      // the viewport:
+      //     true scoring point = detected rim + (-0.00457*W, +0.04431*H)
+      //     scoring radius     = 0.04630*H   (25 game-px on a 540-tall design canvas)
+      //
+      // The old crossing-through-rim.y test was wrong on both axes -- wrong
+      // target (rim.y instead of the scoring point ~24px below it) and wrong
+      // criterion (a line crossing instead of the game's own circle test) -- and
+      // it systematically UNDER-called makes: 18 called vs 27 actual across 43
+      // shots, 56% agreement. The same 25px-radius circle test applied to the
+      // game's own ball trace (not this helper's prediction) agreed with the real
+      // outcome 40/43 -- that is the standard this replacement is judged against.
+      const SCORE_DX = -0.00457;   // * W: detected rim.x -> scoring point x
+      const SCORE_DY = 0.04431;    // * H: detected rim.y -> scoring point y
+      const SCORE_R = 0.04630;     // * H: scoring radius (25px on a 540-tall canvas)
+
+      // DEAD END, measured, do not retry without new evidence: widening SCORE_R to
+      // catch bank-ins. Most makes here are banked (20 of 26 in one session), and a
+      // ballistic arc cannot predict a ball that rattles in, so a wider radius
+      // looks like the obvious fix. It is not, because the predicted distance
+      // carries almost no information about the outcome in the first place.
+      //
+      // Measured over 43 shots, ghostMinDist against whether the shot actually
+      // scored:
+      //     mean ghostMinDist | made  42.4px
+      //     mean ghostMinDist | miss  43.2px
+      //     AUC 0.474   (0.5 is no information at all; 1.0 is perfect)
+      // Fitting the best threshold on half the shots and scoring it on the other
+      // half gave 29% and 55%, straddling the 51% always-say-miss baseline. There
+      // is no threshold to find.
+      //
+      // The same circle test fed the game's OWN ball trace instead of this
+      // prediction scores AUC 1.000, so the criterion and the geometry are right --
+      // the arc simply is not accurate enough at the rim to discriminate. Residual
+      // arc error is sd 29-49px depending on session, against a 25px radius.
+      // Fix the arc, or the rim detection behind it, before touching this radius.
+      //
+      // Note the session dependence, which is the live lead: on identical code,
+      // arc error sd ran 28.7, 35.3 and 49.3 across three sessions, and rim
+      // detection noise (rimDy sd) ran 2.84, 2.98 and 6.95, degrading as the score
+      // climbed and the hoop moved. Score any change to this per session; overall
+      // ghostMade agreement swung 62% -> 44% between two sessions of the SAME
+      // build, so cross-session comparisons of it are not meaningful at n = 43.
+
+      // Closest point on segment P0->P1 to target T, clamped so it cannot fall
+      // outside the segment (standard clamped projection). Used instead of
+      // point-to-point distance because the arc below is only sampled every
+      // `step` px: checking sampled points alone biases the minimum distance
+      // HIGH between samples and would re-introduce the under-calling above.
+      function closestOnSeg(p0, p1, t) {
+        const dx = p1.x - p0.x, dy = p1.y - p0.y;
+        const len2 = dx * dx + dy * dy;
+        let u = len2 > 0 ? ((t.x - p0.x) * dx + (t.y - p0.y) * dy) / len2 : 0;
+        u = Math.max(0, Math.min(1, u));
+        const x = p0.x + u * dx, y = p0.y + u * dy;
+        return { x, y, d: Math.hypot(t.x - x, t.y - y) };
+      }
+
+      // Set by drawCurve() each call, for the caller to publish on the probe --
+      // drawCurve itself still returns only the made/missed boolean, matching
+      // every existing call site.
+      let lastMinDist = null, lastScorePt = null;
+
       function drawCurve(yAt, xStart, dir, W, H, style) {
         const pts = [];
-        let made = false, hitX = 0;
         const rim = lastRim;
-        const holeX = rim ? rim.x + rim.w * HOLE_OFF : 0;
+        const scorePt = rim ? { x: rim.x + SCORE_DX * W, y: rim.y + SCORE_DY * H } : null;
+        const radius = SCORE_R * H;
+        let minDist = Infinity, closest = null;
         const step = Math.max(3, W / 240) * dir;
         for (let x = xStart, i = 0; i < 900; i++, x += step) {
           const y = yAt(x);
+          const p = { x, y };
           const prev = pts[pts.length - 1];
-          if (rim && prev && prev.y <= rim.y && y >= rim.y &&
-              x > holeX - rim.w * HOLE_HALF && x < holeX + rim.w * HOLE_HALF) { made = true; hitX = x; }
-          pts.push({ x, y });
+          if (scorePt && prev) {
+            const c = closestOnSeg(prev, p, scorePt);
+            if (c.d < minDist) { minDist = c.d; closest = c; }
+          }
+          pts.push(p);
           if (y > H + 80 || x < -80 || x > W + 80) break;
         }
+        lastMinDist = scorePt ? +minDist.toFixed(1) : null;
+        lastScorePt = scorePt ? { x: +scorePt.x.toFixed(1), y: +scorePt.y.toFixed(1) } : null;
         if (pts.length < 2) return false;
 
+        const made = !!scorePt && minDist < radius;
         const green = cfg.makes && made;
         octx.save();
         octx.shadowColor = 'rgba(0,0,0,.7)';
@@ -1477,7 +1588,7 @@
         octx.beginPath(); octx.arc(e.x, e.y, 4, 0, Math.PI * 2); octx.stroke();
         if (made) {
           octx.lineWidth = 2.5;
-          octx.beginPath(); octx.arc(hitX, rim.y, 7, 0, Math.PI * 2); octx.stroke();
+          octx.beginPath(); octx.arc(closest.x, closest.y, 7, 0, Math.PI * 2); octx.stroke();
         }
         octx.restore();
         return made;
@@ -1560,7 +1671,13 @@
         const pl = findPlatform(img.d, img.sw, img.sh, k, W);
         if (pl) { plat = pl; platT = t; }
         else if (t - platT > 700) plat = null;
-        const cosPhi = platCos(H, t);
+        const ph = platCos(H, t);
+        const cosPhi = ph ? ph.cos : null;
+        // Rotate the phase read THIS frame forward to where it will be at
+        // release, 49 ticks (35.035deg) later -- cos(phi+d) = cos(phi)cos(d) -
+        // sin(phi)sin(d). This is what shotCurve's oscillator term needs; see
+        // its comment for the rest of the derivation.
+        const cosRel = ph ? ph.cos * REL_COS - ph.sin * REL_SIN : null;
 
         if (cfg.debug) {
           octx.lineWidth = 1;
@@ -1704,50 +1821,45 @@
         }
 
         // ---- shot preview, anchored to the platform ----
-        let ghostMade = null, ghostRimY = null;
+        let ghostMade = null, ghostRimY = null, ghostMinDist = null, scorePt = null;
         // Drawn whenever a ball is in your hands — NOT gated on "no shot in flight".
         // After a miss both are true at once, and suppressing the preview then is
         // exactly when you need it to line up the next shot.
         if (cfg.ghost && plat && ready) {
           const dir = lastRim ? Math.sign(lastRim.x - plat.x) || 1 : 1;
-          // DISABLED AGAIN, on outcome data rather than on how the preview looks.
+          // RE-ENABLED, on the release-phase slope in shotCurve() rather than the
+          // uL/uR correction this comment used to explain away. That one was
+          // fit and applied at PRESS phase, which is not the phase the engine
+          // actually launches on -- release is 49 ticks (35.035deg) later, see
+          // REL_PHASE above and the derivation in shotCurve(). Applying the
+          // correction at the right phase is what changed the outcome:
           //
-          // Driven against the offline rip with the game's own score as ground
-          // truth, 49 shots paired from release to result:
+          //     arc error sd, n=19:  60.0px -> 30.5px at release phase
+          //                          (only 18% of that gain if applied at press)
+          //     arc error sd, n=32:  70.6px -> 32.5px at release phase
+          //                          (only 30% of that gain if applied at press)
           //
-          //     GREEN  n=28    1/28 swish     19/28 scored (68%)
-          //     red    n=21    0/21 swish     14/21 scored (67%)
-          //
-          // Green means "this arc threads the hole". One of 28 did. And green
-          // scores no better than red, so the preview carries no information about
-          // whether the shot goes in -- which makes a second-order correction to it
-          // unmeasurable by construction.
-          //
-          // The reported feel matches: descending shots are worse (10/16 against
-          // 9/12 ascending, though that gap is only ~0.7 SE and proves nothing on
-          // its own), and ascending is off too when the rim is CLOSE -- small u,
-          // where the arc is dominated by uL, which is the term this correction
-          // moves hardest at up to 0.095 W. The most likely reading is that the
-          // measured L slope is too large to apply raw.
-          //
-          // Re-enabling it on a correlation with the per-flight fits was too weak a
-          // standard. Fits are the helper's own reading of the arc; whether shots
-          // go in is the thing that matters, and by that measure this does not
-          // help. The estimator and the measurements stay -- platCos is sound and
-          // the coupling is real -- but nothing here ships until the arc's error at
-          // the rim (a known mean of 54.7px, worst 117.5px, far wider than the
-          // hole) is brought down. A 70px correction cannot be judged against a
-          // 55px baseline error.
-          const curve = shotCurve(plat.x, plat.y, dir, W, null);
+          // Necessary, not sufficient: residual sd is still ~32px against a 25px
+          // scoring radius (the old 54.7px mean / 117.5px worst-case baseline
+          // this comment used to cite), and rimDy is separately biased about
+          // 25px high and is not touched by this change.
+          const curve = shotCurve(plat.x, plat.y, dir, W, cosRel);
           // Start the line directly above the platform rather than at the curve's
           // left crossing: that crossing is ~0.18 of a screen to the left, which
           // ran off the edge and made the arc appear to fly in from nowhere.
           ghostMade = drawCurve(curve.at, plat.x, dir, W, H, 'ghost');
-          // Where the predicted arc crosses the rim's x. This is the number that
-          // decides a make, and publishing it is what makes the error MEASURABLE
-          // rather than just "missed": against the ball's true height there, it
-          // gives a signed error with a direction and a size.
+          // Where the predicted arc crosses the rim's x. This is kept as a
+          // secondary diagnostic (against the ball's true height there it gives a
+          // signed error with a direction and a size); it is no longer what
+          // decides a make -- see SCORE_DX/DY/R and ghostMinDist below for that.
           if (lastRim) ghostRimY = +curve.at(lastRim.x).toFixed(1);
+          // The actual decision variable now: closest approach of the predicted
+          // arc to the game's own scoring point, set by drawCurve() above. A make
+          // is ghostMinDist < SCORE_R*H -- publishing the distance itself (rather
+          // than just the boolean) is what lets that threshold be checked
+          // externally against real outcomes.
+          ghostMinDist = lastMinDist;
+          scorePt = lastScorePt;
           octx.save();
           const topY = curve.at(plat.x);
           octx.strokeStyle = 'rgba(255,122,112,.35)';             // tie the arc to the platform
@@ -1781,11 +1893,14 @@
 
         probe({
           frame, plat, rim: lastRim, rimWhy, blobs: cands.length, tracks: tracks.length,
-          flying, made, ready, ghostMade, ghostRimY,
+          flying, made, ready, ghostMade, ghostRimY, ghostMinDist, scorePt,
           cal: { a: cfg.shotA, l: cfg.shotL, r: cfg.shotR, seeded: cfg.calSeeded },
           // null until most of one platform swing has been seen; then the
           // quadrature term that sets how hard this particular shot leaves
           cosPhi: cosPhi == null ? null : +cosPhi.toFixed(3),
+          // cosPhi rotated forward to the release phase, 35.035deg later -- the
+          // value actually fed to shotCurve() for the ghost preview
+          cosRel: cosRel == null ? null : +cosRel.toFixed(3),
           platY: plat ? +plat.y.toFixed(1) : null,
           fit: lastFit
         });
