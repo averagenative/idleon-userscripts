@@ -188,7 +188,8 @@ Fishing is a click-and-hold power bar: the longer you hold, the further the bobb
 |---|---|
 | **Arrow on the lane** | Where the cast lands at your current power. Green over a catch, red over a mine, amber otherwise. Green wins when a fish sits on a mine — landing on a fish always counts, even directly on top of one. |
 | **Ring + name + points** | A catchable on the lane: green fish +1, gold eel +2, purple squid +3, blue whale +5 (higher tiers appear as your landing streak grows — and catching the whale resets the streak). |
-| **Band through a ring** | The **catch window**: every point the bobber can land and still take that fish. The game asks you to land within 15–23 lane units of one, not on it, so a whale is forgiving over nearly a sixth of the lane and a fish over a twentieth. Both edges are drawn, because the edge is where a cast stops being a catch. |
+| **Band through a ring** | The **catch window**: every point the bobber can land and still take that fish. The game asks you to land within 15–23 lane units of one, not on it, so a whale is forgiving over nearly a sixth of the lane and a fish over a twentieth. Both edges are drawn, because the edge is where a cast stops being a catch. Drawn around where the fish will *be* when the cast lands — solid once its bob is tracked, dashed while it isn't. |
+| **Dotted leader from a ring** | How far the fish will swim while your bobber is in the air. Deliberately a hairline with no fill, so it never reads as somewhere you can land — it just joins the sprite to the band that belongs to it. |
 | **Percentage + milliseconds left of a ring** | The gauge fill to release at, and how long the window stays open. The milliseconds are the real measure of how hard the cast is: the same tolerance is 210 ms of gauge for a fish under the rod and 30 ms for a squid at the far end. Both update live, so they keep tracking once the fish start to move. |
 | **Band on the power gauge** | The same window, as fills to release between, with a hairline per rung of the gauge. Anywhere inside it catches; nothing outside it does. |
 | **Red ring, "AVOID"** | A mine on the lane. |
@@ -216,6 +217,34 @@ Two things come out of it that a fitted curve could not give.
 Nothing is ever out of reach — a full cast stops at 93% of the lane and fish spawn out to 96%, which is still inside a fish's own tolerance — but the far half of the lane is a 30-to-70 ms window. That is what makes a late release so expensive out there: **a release 30 ms late lands 3 lane units further out at the bottom of the gauge and 18 at the top**, against windows of 15 to 23. Thirty milliseconds is a frame and a half.
 
 Which is the whole of "if I aim at the mark I sail past it, and if I aim under it I catch". **tuning > Release lead** is where to put that number: it is how long after you decide to let go the game actually locks the power in — your reaction, the browser's event, the frame you were looking at already being a frame old. Every mark is then drawn that much early, and the live arrow looks that much ahead. It is seeded at 0 because it is yours and not the game's, and the status line measures it for you: it attributes each cast to the mark it came closest to and reports how late your releases are still landing. **Use the measured lead** folds that reading into the setting; when the readout sits at 0 ms, the marks are where you should let go.
+
+### The fish do not hold still
+
+From cast 6 the lane bobs, and from cast 17 it widens: `bob = A * sin(G16)` with `G16` advancing 1.3 degrees every 20 ms, so 65 deg/s and a 5.54 s period. `A` is 13 lane units to cast 16, reaching 23 by cast 30 and 30 by cast 60. A cast is in the air 600 to 1160 ms, so a fish can cover **up to 35 lane units while your bobber is flying** — more than a whale's entire catch window.
+
+So marking where a fish *is* stops meaning much. Simulated over 60 lanes at casts 18–42, of the casts each model calls a catch:
+
+| | casts called | really catch |
+|---|---|---|
+| where the fish is now | 450 | **53%** |
+| where it will be on landing | 437 | **99%** |
+
+53% is a coin flip, and it is what every version before v2.7 drew.
+
+v2.7 tests **every rung separately, against its own landing moment**. Each rung is in the air for a different length of time, so there is no single position of the fish to aim at; what comes back is the set of casts that actually connect. It is drawn as bands of contiguous rungs rather than one span — the set has never been observed to split, and probably cannot, but a single band would silently paint over a gap if it ever did.
+
+The frequency is known exactly, so only the centre, amplitude and phase have to be fitted, and `x = c + a sin(wt) + b cos(wt)` is linear in all three. What the fit needs is **time**, not samples:
+
+| history | prediction error 900 ms out (p50 / p90 / worst) |
+|---|---|
+| 0.5 s | 3.6 / 8.6 / 16.0 — useless |
+| 1.0 s | 1.0 / 2.3 / 4.5 |
+| 1.5 s | 0.5 / 1.1 / 2.5 |
+| 2.5 s | 0.2 / 0.5 / 1.0 |
+
+And the residual **cannot** be used to tell a good fit from a bad one: fits that went on to miss by more than 6 units had an rms of 0.28, against 0.30 for the ones that did not. A short arc fits its own noise perfectly and extrapolates into nonsense anyway. So the gate is the time span and nothing else, set at 1.2 s. Below it the helper draws dashed and says it is not tracking, rather than guessing. The history is dropped every time the bobber lands, because the bob freezes while it sits in the water and the fish are moved the moment it is reeled in — which means the fit is cold for 1.2 s after every catch, by design.
+
+Driven end to end, the shipped code fed fish positions out of the offline module frame by frame and scored against the game's own bob: **98.0% of called casts really catch at 50 fps, 97.6% at 30**. The one assumption is that the page's clock and the game's agree, since the frequency is fixed and the timestamps are `performance.now()`. Injected deliberately, a 5% slow page costs 93.3% and a 20% slow page 82.5% — still well clear of 53%, so lag degrades this rather than inverting it. **Lead the fish** turns it off.
 
 ### Calibration
 

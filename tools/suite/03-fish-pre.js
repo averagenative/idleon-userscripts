@@ -25,6 +25,7 @@
         <div class="row"><label>Fish / hazards</label><input id="marks" type="checkbox"></div>
         <div class="row"><label>Cast arc</label><input id="arcx" type="checkbox"></div>
         <div class="row"><label>Ruler 0–8</label><input id="ruler" type="checkbox"></div>
+        <div class="row"><label>Lead the fish</label><input id="bob" type="checkbox"></div>
         <div id="st">idle</div>
         <details>
           <summary>tuning</summary>
@@ -46,6 +47,7 @@
       function sync() {
         $('#aim').checked = cfg.aim; $('#marks').checked = cfg.marks;
         $('#arcx').checked = cfg.arc; $('#ruler').checked = cfg.ruler;
+        $('#bob').checked = cfg.bob;
         $('#debug').checked = cfg.debug; $('#lead').value = cfg.lead | 0;
         dot.classList.toggle('on', cfg.on);
         runBtn.textContent = cfg.on ? 'Hide helper  (F4)' : 'Show helper  (F4)';

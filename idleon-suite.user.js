@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         IdleOn Helper Suite
 // @namespace    nativerobot
-// @version      1.55
+// @version      1.57
 // @downloadURL https://raw.githubusercontent.com/averagenative/idleon-userscripts/main/idleon-suite.user.js
 // @updateURL   https://raw.githubusercontent.com/averagenative/idleon-userscripts/main/idleon-suite.user.js
 // @description  All-in-one: autoclicker + Hoops, Fishing and Darts minigame helpers for Legends of IdleOn, each one individually switchable
@@ -1952,6 +1952,7 @@
         aim: true,         // live landing marker while the power bar charges
         arc: true,         // dotted arc for a bobber already in the air
         ruler: true,       // numbered 0-8 graduations on the gauge and lane
+        bob: true,         // predict where the fish will be when the cast lands
         debug: false,
         // Where a cast lands is not fitted any more. The SHAPE of the curve is the
         // game's own — see "the game's own cast law" below — and the only thing
@@ -2035,6 +2036,7 @@
         <div class="row"><label>Fish / hazards</label><input id="marks" type="checkbox"></div>
         <div class="row"><label>Cast arc</label><input id="arcx" type="checkbox"></div>
         <div class="row"><label>Ruler 0–8</label><input id="ruler" type="checkbox"></div>
+        <div class="row"><label>Lead the fish</label><input id="bob" type="checkbox"></div>
         <div id="st">idle</div>
         <details>
           <summary>tuning</summary>
@@ -2056,6 +2058,7 @@
       function sync() {
         $('#aim').checked = cfg.aim; $('#marks').checked = cfg.marks;
         $('#arcx').checked = cfg.arc; $('#ruler').checked = cfg.ruler;
+        $('#bob').checked = cfg.bob;
         $('#debug').checked = cfg.debug; $('#lead').value = cfg.lead | 0;
         dot.classList.toggle('on', cfg.on);
         runBtn.textContent = cfg.on ? 'Hide helper  (F4)' : 'Show helper  (F4)';
@@ -2604,8 +2607,12 @@
           // The loop guard is the game's own test, and the step it refuses to take
           // is the point of it. The x < 5 arm is the game's too: the first updates
           // always run, before the bobber has cleared the rod.
-          for (let k = 0; k < 400 && (y + vy < 5 || x < 5); k++) { x += vx; y += vy; vy += 0.05; }
-          out.push({ ang, p, u: x });
+          let k = 0;
+          for (; k < 400 && (y + vy < 5 || x < 5); k++) { x += vx; y += vy; vy += 0.05; }
+          // How long this cast is in the air, which matters because the fish keep
+          // swimming while it is. 600 ms off the bottom of the gauge, 1160 ms off
+          // the top — more than a fifth of the lane bob's whole period.
+          out.push({ ang, p, u: x, ms: k * 10 });
         }
         return out;
       })();
@@ -2680,7 +2687,7 @@
       // rather than refused at the ends, because the far end of the lane is out of
       // reach — a full cast stops at 93% of it — and yet fish spawn out to 96%
       // and are still catchable from there, being only 3% short against a window of
-      // 5%. Whether such a fish can actually be had is catchWindow's answer, not
+      // 5%. Whether such a fish can actually be had is planFor's answer, not
       // this one's.
       const invAim = f => Math.max(0, Math.min(1, castP(cfg.aimU0 + f * cfg.aimUW)));
 
@@ -2690,7 +2697,8 @@
       // against every cast that can be made, so what comes back is not an estimate
       // of a tolerance but the list of releases that work.
       //
-      // Measured across every position each species can spawn at, the windows are
+      // Measured across every position each species can spawn at, with a fish that
+      // is holding still:
       //
       //   fish   tol 15   5..21 rungs    50..210 ms   mean  90 ms
       //   eel    tol 16   5..8  rungs    50..80  ms   mean  61 ms
@@ -2701,6 +2709,36 @@
       // ms window, which is why a release that is 30 ms late — and 30 ms is a
       // frame and a half — misses everything out there while the same release up
       // close still lands. Hence the lead below.
+      //
+      // `where` is asked where the fish will be at a given moment, because each
+      // rung is in the air for a different length of time (600 ms off the bottom of
+      // the gauge, 1160 off the top) and the fish do not hold still. Testing every
+      // rung separately against its OWN landing moment is the only way to get this
+      // right; there is no single position of the fish to aim at.
+      const hitRungs = (where, catchU, now) => {
+        const out = [];
+        const from = now + (cfg.lead || 0);
+        for (let i = 0; i < CAST.length; i++)
+          if (Math.abs(where(from + CAST[i].ms) - CAST[i].u) < catchU) out.push(i);
+        return out;
+      };
+
+      // The rungs as contiguous runs. In 60 simulated lanes at casts 18-42 the set
+      // never once split, and it should not be able to: a rung is worth 0.8 lane
+      // units at the bottom of the gauge and 6.6 at the top, against a fish that
+      // covers at most 0.41 of a unit in the 10 ms between one rung's landing and
+      // the next's, so the landing always outruns the fish. Drawn as runs anyway,
+      // because the cost is ten lines and the alternative is a band that quietly
+      // spans a gap it should not.
+      const runsOf = rungs => {
+        const runs = [];
+        for (const i of rungs) {
+          const last = runs[runs.length - 1];
+          if (last && i === last[1] + 1) last[1] = i; else runs.push([i, i]);
+        }
+        return runs;
+      };
+
       // null means no cast catches it, which is a real answer and not a failure.
       // Every position the game can SPAWN at has a window — checked over all of
       // them — but the near end of the lane does not: a zero-power cast still
@@ -2709,20 +2747,132 @@
       // where the species pass picks something up in the lane's left padding. The
       // ring still draws; it just has no power to put beside it, which beats
       // clamping to an empty gauge and claiming that would work.
-      const catchWindow = (f, catchU) => {
-        const u = cfg.aimU0 + f * cfg.aimUW;
-        let lo = -1, hi = -1;
-        for (let i = 0; i < CAST.length; i++)
-          if (Math.abs(CAST[i].u - u) < catchU) { if (lo < 0) lo = i; hi = i; }
-        if (lo < 0) return null;
-        // mid is the rung in the MIDDLE OF THE WINDOW, not the one that lands
-        // dead on the fish. For anything in reach they are within a rung of each
-        // other; for a fish past the end of a full cast only this one exists.
-        // i0/i1 come back as well so a drawing can put the rungs where they really
-        // are. Spacing them evenly across the band would be a lie about the one
-        // thing the ladder is here to say.
-        return { i0: lo, i1: hi, lo: CAST[lo].p, hi: CAST[hi].p, mid: CAST[(lo + hi) >> 1].p, n: hi - lo + 1 };
+      const planFor = (where, catchU, now) => {
+        const rungs = hitRungs(where, catchU, now);
+        if (!rungs.length) return null;
+        const mid = rungs[rungs.length >> 1];
+        return {
+          rungs, runs: runsOf(rungs), n: rungs.length,
+          lo: CAST[rungs[0]].p, hi: CAST[rungs[rungs.length - 1]].p,
+          // mid is the rung in the MIDDLE OF THE WINDOW, not the one that lands
+          // dead on the fish. For anything in reach they are within a rung of each
+          // other; for a fish past the end of a full cast only this one exists.
+          mid: CAST[mid].p,
+          // and where the fish will actually BE when that cast arrives, which is
+          // what the lane band is drawn around. Not where it is now, and not the
+          // span it drifts across on the way.
+          at: where(now + (cfg.lead || 0) + CAST[mid].ms)
+        };
       };
+
+      // ---------- the fish do not hold still ----------
+      // From cast 6 the lane bobs: bob = A * sin(G16), with G16 advancing 1.3
+      // degrees every 20 ms, so 65 deg/s and a period of 5.54 s. A is 13 lane units
+      // to cast 16 and grows after 17, reaching 23 by cast 30 and 30 by cast 60.
+      //
+      // That is not a detail. A cast is in the air 600 to 1160 ms, and over 900 ms
+      // of it a fish at the wide end of that range covers up to 35 lane units —
+      // more than a whale's entire catch window. Marking where a fish IS is
+      // therefore close to worthless late in a run. Simulated over 60 lanes at
+      // casts 18-42, of the casts a mark placed on the fish's current position
+      // calls a catch:
+      //
+      //   where the fish is now          450 casts called, 53% really catch
+      //   where it will be on landing    437 casts called, 99% really catch
+      //
+      // 53% is a coin flip, and it is what every version before this one drew.
+      //
+      // The fit is the honest one: the frequency is known exactly, so only the
+      // centre, amplitude and phase are unknown, and x = c + a sin(wt) + b cos(wt)
+      // is linear in all three. What it needs is TIME, not samples — a short arc
+      // of a sinusoid fits beautifully and extrapolates into nonsense:
+      //
+      //   history   prediction error 900 ms out, p50 / p90 / worst
+      //     0.5 s        3.6  /  8.6  / 16.0      (useless)
+      //     1.0 s        1.0  /  2.3  /  4.5
+      //     1.5 s        0.5  /  1.1  /  2.5
+      //     2.5 s        0.2  /  0.5  /  1.0
+      //
+      // And the residual CANNOT be used to tell those apart: fits that went on to
+      // miss by more than 6 units had an rms of 0.28 against 0.30 for the ones that
+      // did not. The short window fits its noise perfectly and is wrong anyway. So
+      // the gate is the SPAN and nothing else, set at 1.2 s for margin over the
+      // 1.0 s where the failures stop, and below it the helper says it is not
+      // tracking rather than guessing.
+      //
+      // Driven end to end — THIS code, fed fish positions out of the offline module
+      // frame by frame, its plans then scored against the game's own bob advanced
+      // to each rung's landing moment — 60 lanes, 458 casts called hittable:
+      //
+      //   98.0% really catch at 50 fps, 97.6% at 30, none of the plans cold
+      //   after 2.0 s of frames, and not one of the 60 split into two runs.
+      //
+      // The band ends up a median 15.3 lane units ahead of the sprite, worst 28.3.
+      // That offset IS the correction, and it is why the leader line is drawn: at
+      // 28 units the band is nowhere near the fish it belongs to, and without
+      // something joining the two it just looks broken.
+      //
+      // The one assumption is that the page's clock and the game's agree, since w
+      // is fixed and the timestamps are performance.now(). If the game falls behind
+      // real time the fit is off-frequency. Injected deliberately: 5% slow costs
+      // 93.3%, 20% slow costs 82.5% — still well clear of the 53% that marking the
+      // fish where it sits scores, so a laggy page degrades this rather than
+      // inverting it. Found by getting it wrong in the test rig first.
+      const BOB_W = 65 * Math.PI / 180 / 1000;   // rad per ms
+      const TRACK_KEEP = 2500;                   // history kept, ms
+      const TRACK_SPAN = 1200;                   // ...and how much of it the fit needs
+      const TRACK_AMP = 45;                      // the game's own worst case is 36
+      let tracks = [];
+
+      // Which detected fish is which, frame to frame. Nearest within its own
+      // species, and only within 12 lane units — a fish covers 0.41 of a unit
+      // between frames at its fastest, so 12 is enormous slack for the centroid
+      // jitter while staying under the gap the game leaves between two fish.
+      function trackFish(seen, now, frozen) {
+        // The bob stops dead while the bobber is in the water, and the fish are
+        // moved to new places the moment it is reeled in. Both make every sample
+        // taken before now a lie about where the fish is going, so the history goes
+        // with them. This is also why the gate matters: after every catch the fit
+        // is cold for 1.2 s, and it says so instead of drawing a stale curve.
+        if (frozen) { tracks = []; return; }
+        const free = tracks.slice();
+        for (const s of seen) {
+          let best = null, bestD = 12;
+          for (const tr of free) {
+            const d = Math.abs(tr.u - s.u);
+            if (tr.name === s.name && d < bestD) { best = tr; bestD = d; }
+          }
+          if (best) free.splice(free.indexOf(best), 1);
+          else { best = { name: s.name, t0: now, hist: [] }; tracks.push(best); }
+          best.u = s.u; best.seen = now;
+          best.hist.push({ t: now - best.t0, u: s.u });
+          while (best.hist.length > 1 && now - best.t0 - best.hist[0].t > TRACK_KEEP) best.hist.shift();
+          s.track = best;
+        }
+        tracks = tracks.filter(tr => now - tr.seen < 400);
+      }
+
+      // c + a sin(wt) + b cos(wt), least squares, w known. Returns null until the
+      // history is long enough to mean anything.
+      function bobFit(tr) {
+        const h = tr.hist;
+        if (h.length < 8 || h[h.length - 1].t - h[0].t < TRACK_SPAN) return null;
+        const M = [[0, 0, 0], [0, 0, 0], [0, 0, 0]], V = [0, 0, 0];
+        for (const q of h) {
+          const f = [1, Math.sin(BOB_W * q.t), Math.cos(BOB_W * q.t)];
+          for (let i = 0; i < 3; i++) {
+            for (let j = 0; j < 3; j++) M[i][j] += f[i] * f[j];
+            V[i] += f[i] * q.u;
+          }
+        }
+        const s = solve3(M, V);
+        if (!s) return null;
+        const [c, a, b] = s;
+        // A fit wilder than the game can produce is a fit through something that
+        // is not a bobbing fish — a flickering detection, two sprites swapped.
+        if (!(Math.hypot(a, b) <= TRACK_AMP)) return null;
+        return t => c + a * Math.sin(BOB_W * (t - tr.t0)) + b * Math.cos(BOB_W * (t - tr.t0));
+      }
 
       // ---------- release lead ----------
       // cfg.lead is the delay between you deciding to let go and the game locking
@@ -2940,6 +3090,20 @@
             .filter(o => o.n >= 110 * px * px && o.x > laneX0)
             .filter(o => !landed || Math.abs(o.x - landed.x) > W * 0.02);
         }
+        // Everything below works in the game's lane units: the fish, the casts and
+        // the tolerances are all on that scale, and only the drawing goes back to
+        // pixels. Done once here so the drawing, the lead learner and the probe all
+        // read the same plan rather than each recomputing its own.
+        const uOf = x => cfg.aimU0 + (x - laneX0) / laneW * cfg.aimUW;
+        const xOf = u => laneX0 + (u - cfg.aimU0) / cfg.aimUW * laneW;
+        for (const f of fish) f.u = uOf(f.x);
+        trackFish(fish, t, !!landed);
+        for (const f of fish) {
+          const fit = cfg.bob && f.track ? bobFit(f.track) : null;
+          f.tracked = !!fit;
+          f.plan = planFor(fit || (() => f.u), f.catchU, t);
+        }
+
         if (cfg.marks) {
           // The catch REGION, not the spot. The game does not ask you to land on a
           // fish, it asks you to land within 15 to 23 lane units of one, and that
@@ -2949,20 +3113,38 @@
           //
           // Drawn as a filled band with its two edges picked out, because the edge
           // is the part that matters — it is where a cast stops being a catch.
+          //
+          // Drawn around where the fish will BE when the cast arrives, not where it
+          // is now and not across the whole stretch it drifts over — a bar spanning
+          // the drift would be a bar that is mostly wrong at any given moment. Solid
+          // while the bob is tracked; dashed while it is not, which is the helper
+          // saying it is working from a still fish and you should not trust it yet.
+          // The two are worth telling apart on sight: they differ by up to 35 lane
+          // units, which is wider than a whale.
           const bandH = Math.max(5, Math.round(laneW * 0.018));
           octx.save();
           octx.shadowColor = 'rgba(0,0,0,.6)'; octx.shadowBlur = 2;
           for (const f of fish) {
             const r = tolFrac(f.catchU) * laneW;
-            if (r <= 0) continue;
+            if (r <= 0 || !f.plan) continue;
+            const cx = xOf(f.plan.at);
             octx.fillStyle = octx.strokeStyle = f.color;
-            octx.globalAlpha = 0.16;
-            octx.fillRect(f.x - r, f.y - bandH, r * 2, bandH * 2);
-            octx.globalAlpha = 0.55; octx.lineWidth = 2;
+            octx.setLineDash(f.tracked ? [] : [3, 3]);
+            octx.globalAlpha = f.tracked ? 0.16 : 0.08;
+            octx.fillRect(cx - r, f.y - bandH, r * 2, bandH * 2);
+            octx.globalAlpha = f.tracked ? 0.55 : 0.4; octx.lineWidth = 2;
             octx.beginPath();
-            octx.moveTo(f.x - r, f.y - bandH); octx.lineTo(f.x - r, f.y + bandH);
-            octx.moveTo(f.x + r, f.y - bandH); octx.lineTo(f.x + r, f.y + bandH);
+            octx.moveTo(cx - r, f.y - bandH); octx.lineTo(cx - r, f.y + bandH);
+            octx.moveTo(cx + r, f.y - bandH); octx.lineTo(cx + r, f.y + bandH);
             octx.stroke();
+            // A thin leader from the sprite to where it is headed. Deliberately not
+            // the same object as the band: one hairline, no fill, so it reads as
+            // "the fish is going there" and never as "this is catchable".
+            if (Math.abs(cx - f.x) > 3) {
+              octx.setLineDash([2, 4]); octx.globalAlpha = 0.5; octx.lineWidth = 1;
+              octx.beginPath(); octx.moveTo(f.x, f.y); octx.lineTo(cx, f.y); octx.stroke();
+            }
+            octx.setLineDash([]);
           }
           octx.restore();
           // Left of each catch, the gauge fill to release at and how long the
@@ -2971,7 +3153,7 @@
           // close and 50 ms at the far end. Both recomputed every frame, so once
           // the fish start moving (later in a run) the labels track them.
           for (const f of fish) {
-            const w = catchWindow((f.x - laneX0) / laneW, f.catchU);
+            const w = f.plan;
             drawLaneMark(f.x, f.y, f.color, `${f.name} +${f.pts}`,
                          w ? `${(leadBack(w.mid) * 100) | 0}% · ${w.n * 10}ms` : null);
           }
@@ -2986,6 +3168,9 @@
               // Same treatment for the pufferfish, and the same drawing: its region
               // is how far away you have to stay, and at 19 lane units it is wider
               // than every catch except the whale.
+              // The pufferfish does NOT bob — the game skips type 5 when it moves
+              // the lane, so this one really is where it looks like it is, and its
+              // band needs no prediction and gets no leader.
               const r = tolFrac(HAZARD_U) * laneW;
               const bh = Math.max(5, Math.round(laneW * 0.018));
               octx.save();
@@ -3031,35 +3216,44 @@
           octx.save();
           octx.shadowColor = 'rgba(0,0,0,.6)'; octx.shadowBlur = 3;
           for (const f of fish) {
-            const w = catchWindow((f.x - laneX0) / laneW, f.catchU);
+            const w = f.plan;
             if (!w) continue;
-            const yLo = gy(leadBack(w.lo)), yHi = gy(leadBack(w.hi)), h = Math.abs(yHi - yLo);
             octx.fillStyle = octx.strokeStyle = f.color;
-            octx.globalAlpha = 0.3;
-            octx.fillRect(tx - 12, Math.min(yLo, yHi), 20, Math.max(1, h));
-            // Its two edges, hard, and the middle rung as the old tick used to be.
-            octx.globalAlpha = 0.9; octx.lineWidth = 2;
-            octx.beginPath();
-            octx.moveTo(tx - 12, yLo); octx.lineTo(tx + 8, yLo);
-            octx.moveTo(tx - 12, yHi); octx.lineTo(tx + 8, yHi);
-            octx.stroke();
-            octx.globalAlpha = 0.55; octx.lineWidth = 1;
-            octx.beginPath(); octx.moveTo(tx - 12, gy(leadBack(w.mid))); octx.lineTo(tx + 8, gy(leadBack(w.mid)));
-            octx.stroke();
-            // One hairline per rung, each at the fill that rung really sits at —
-            // they are not evenly spaced and drawing them as if they were would
-            // throw away the only thing the ladder has to say. Drawn only while
-            // they are far enough apart to read: a 21-rung fish window is about
-            // 14px of gauge, and 21 lines in 14px is a smear, not a count.
-            if (h / w.n >= 3) {
-              octx.globalAlpha = 0.45; octx.lineWidth = 1;
+            octx.setLineDash(f.tracked ? [] : [3, 3]);
+            // One band per RUN of hittable rungs. The set has never been seen to
+            // split, and probably cannot, but a single band drawn from the lowest
+            // to the highest would silently paint over a gap if it ever did — and
+            // a gap is precisely the thing you would need to know about.
+            for (const [i0, i1] of w.runs) {
+              const yLo = gy(leadBack(CAST[i0].p)), yHi = gy(leadBack(CAST[i1].p));
+              const h = Math.abs(yHi - yLo);
+              octx.globalAlpha = f.tracked ? 0.3 : 0.15;
+              octx.fillRect(tx - 12, Math.min(yLo, yHi), 20, Math.max(1, h));
+              octx.globalAlpha = f.tracked ? 0.9 : 0.5; octx.lineWidth = 2;
               octx.beginPath();
-              for (let i = w.i0; i <= w.i1; i++) {
-                const y = gy(leadBack(CAST[i].p));
-                octx.moveTo(tx - 4, y); octx.lineTo(tx + 8, y);
-              }
+              octx.moveTo(tx - 12, yLo); octx.lineTo(tx + 8, yLo);
+              octx.moveTo(tx - 12, yHi); octx.lineTo(tx + 8, yHi);
               octx.stroke();
+              // One hairline per rung, each at the fill that rung really sits at —
+              // they are not evenly spaced and drawing them as if they were would
+              // throw away the only thing the ladder has to say. Drawn only while
+              // they are far enough apart to read: a 21-rung fish window is about
+              // 14px of gauge, and 21 lines in 14px is a smear, not a count.
+              if (h / (i1 - i0 + 1) >= 3) {
+                octx.globalAlpha = 0.45; octx.lineWidth = 1;
+                octx.beginPath();
+                for (let i = i0; i <= i1; i++) {
+                  const y = gy(leadBack(CAST[i].p));
+                  octx.moveTo(tx - 4, y); octx.lineTo(tx + 8, y);
+                }
+                octx.stroke();
+              }
             }
+            // The middle rung, where the old tick used to be.
+            octx.globalAlpha = 0.55; octx.lineWidth = 1; octx.setLineDash([]);
+            octx.beginPath();
+            octx.moveTo(tx - 12, gy(leadBack(w.mid))); octx.lineTo(tx + 8, gy(leadBack(w.mid)));
+            octx.stroke();
           }
           octx.restore();
         }
@@ -3166,10 +3360,7 @@
           if (!hold || Math.abs(charge - hold.power) > 0.03)
             hold = {
               power: charge, t, xs: [],
-              marks: fish.map(f => {
-                const w = catchWindow((f.x - laneX0) / laneW, f.catchU);
-                return w ? leadBack(w.mid) : null;
-              }).filter(v => v !== null)
+              marks: fish.map(f => f.plan ? leadBack(f.plan.mid) : null).filter(v => v !== null)
             };
           else if (landed && t - hold.t > 300) hold.xs.push(landed.x);
         } else if (hold) {
@@ -3219,7 +3410,8 @@
           const cal = `lane ${laneW | 0}px · ${cfg.samples.length} casts learned`;
           const line2 = bob ? (landX !== null ? `cast lands at ${((landX - laneX0) / laneW * 100) | 0}% of lane` : 'tracking cast')
                       : charge > 0.02 ? `power ${(charge * 100) | 0}% → ${(aimFrac(leadFwd(charge)) * 100) | 0}% of lane`
-                      : `${fish.length} fish · ${haz.length} hazards`;
+                      : `${fish.length} fish · ${haz.length} hazards` +
+                        (cfg.bob && fish.length ? ` · ${fish.filter(f => f.tracked).length} tracked` : '');
           // The one thing watching cannot tell you: how late your own releases are
           // landing against the marks. Set tuning > lead to what this says and it
           // should read 0ms; it is the readout that proves the number, not the
@@ -3233,9 +3425,14 @@
           frame, lane, meter: m, charge,
           aimAt: aimX === null ? null : (aimX - laneX0) / laneW,
           lead: cfg.lead, leadSeen: leadSeen(), leadObs: cfg.leadObs.length,
-          // The catch window of the nearest thing to the bobber's reach, as rungs
-          // of the gauge: the number this whole version exists to draw.
-          win: fish.length ? catchWindow((fish[0].x - laneX0) / laneW, fish[0].catchU) : null,
+          // The first fish's plan: the hittable rungs, whether its bob is being
+          // tracked, and how far ahead of the sprite the band has been placed.
+          win: fish.length && fish[0].plan
+            ? { n: fish[0].plan.n, lo: fish[0].plan.lo, hi: fish[0].plan.hi,
+                runs: fish[0].plan.runs.length, tracked: fish[0].tracked,
+                leadU: fish[0].plan.at - fish[0].u }
+            : null,
+          tracks: tracks.length,
           landAt: landX === null ? null : (landX - laneX0) / laneW,
           // Where the bobber actually IS, as a fraction of the lane. The one
           // number that says whether the mapping is right: park a cast, read this,
@@ -3246,12 +3443,13 @@
         });
       }
       // ---------- wiring ----------
-      const toggle = () => { cfg.on = !cfg.on; if (!cfg.on) bobHist = []; save(); sync(); };
+      const toggle = () => { cfg.on = !cfg.on; if (!cfg.on) { bobHist = []; tracks = []; } save(); sync(); };
       runBtn.onclick = toggle;
       $('#aim').onchange   = e => { cfg.aim = e.target.checked; save(); };
       $('#marks').onchange = e => { cfg.marks = e.target.checked; save(); };
       $('#arcx').onchange  = e => { cfg.arc = e.target.checked; save(); };
       $('#ruler').onchange = e => { cfg.ruler = e.target.checked; save(); };
+      $('#bob').onchange   = e => { cfg.bob = e.target.checked; tracks = []; save(); };
       $('#debug').onchange = e => { cfg.debug = e.target.checked; save(); };
       $('#lead').onchange = e => {
         cfg.lead = Math.max(0, Math.min(300, +e.target.value || 0));
