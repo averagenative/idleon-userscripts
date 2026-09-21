@@ -25,10 +25,14 @@
         <div class="row"><label>Fish / hazards</label><input id="marks" type="checkbox"></div>
         <div class="row"><label>Cast arc</label><input id="arcx" type="checkbox"></div>
         <div class="row"><label>Ruler 0–8</label><input id="ruler" type="checkbox"></div>
+        <div class="row"><label>Lead the fish</label><input id="bob" type="checkbox"></div>
         <div id="st">idle</div>
         <details>
           <summary>tuning</summary>
           <div class="body">
+            <div class="row"><label>Release lead</label>
+              <span><input id="lead" type="number" min="0" max="300" step="10" style="width:52px">ms</span></div>
+            <button class="btn sm" id="takelead">Use the measured lead</button>
             <div class="row"><label>Debug blobs</label><input id="debug" type="checkbox"></div>
             <button class="btn sm" id="cal">Reset aim calibration</button>
           </div>
@@ -43,7 +47,8 @@
       function sync() {
         $('#aim').checked = cfg.aim; $('#marks').checked = cfg.marks;
         $('#arcx').checked = cfg.arc; $('#ruler').checked = cfg.ruler;
-        $('#debug').checked = cfg.debug;
+        $('#bob').checked = cfg.bob;
+        $('#debug').checked = cfg.debug; $('#lead').value = cfg.lead | 0;
         dot.classList.toggle('on', cfg.on);
         runBtn.textContent = cfg.on ? 'Hide helper  (F4)' : 'Show helper  (F4)';
         runBtn.className = 'btn ' + (cfg.on ? 'stop' : 'go');
