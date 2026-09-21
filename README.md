@@ -182,21 +182,46 @@ The preview appears whenever a ball is in your hands, which deliberately include
 
 **[`idleon-fishing.user.js`](idleon-fishing.user.js)** helps you place a cast in the fishing minigame. Also draw-only.
 
-Fishing is a click-and-hold power bar: the longer you hold, the further the bobber flies. The helper reads the power gauge while you hold and draws a **live marker on the lane showing where the cast will land**, so you can release when it's over a fish and not over a hazard.
+Fishing is a click-and-hold power bar: the longer you hold, the further the bobber flies. The helper reads the power gauge while you hold and draws a **live marker on the lane showing where the cast will land**, so you can release when it's over a fish and not over a hazard — and a **band around each fish showing how much room you actually have**, which is more than the sprites suggest and less time than you would think.
 
 | Overlay | Meaning |
 |---|---|
 | **Arrow on the lane** | Where the cast lands at your current power. Green over a catch, red over a mine, amber otherwise. Green wins when a fish sits on a mine — landing on a fish always counts, even directly on top of one. |
 | **Ring + name + points** | A catchable on the lane: green fish +1, gold eel +2, purple squid +3, blue whale +5 (higher tiers appear as your landing streak grows — and catching the whale resets the streak). |
-| **Percentage left of a ring** | The target power that lands the cast on that catch — hold until the gauge reads this, then release. Also drawn as a tick on the power gauge in the same colour. Both update live, so they keep tracking once the fish start to move. |
+| **Band through a ring** | The **catch window**: every point the bobber can land and still take that fish. The game asks you to land within 15–23 lane units of one, not on it, so a whale is forgiving over nearly a sixth of the lane and a fish over a twentieth. Both edges are drawn, because the edge is where a cast stops being a catch. |
+| **Percentage + milliseconds left of a ring** | The gauge fill to release at, and how long the window stays open. The milliseconds are the real measure of how hard the cast is: the same tolerance is 210 ms of gauge for a fish under the rod and 30 ms for a squid at the far end. Both update live, so they keep tracking once the fish start to move. |
+| **Band on the power gauge** | The same window, as fills to release between, with a hairline per rung of the gauge. Anywhere inside it catches; nothing outside it does. |
 | **Red ring, "AVOID"** | A mine on the lane. |
 | **Amber dotted arc + ring** | A bobber already in the air, and where it will come down. |
 | **White 0–8 ruler** | Numbered graduations on the power gauge and their matching landing marks on the lane — hold the gauge to *N* to land at *N*. Idea borrowed from [se7enek's IdleonHelper](https://github.com/se7enek/IdleonHelper) (a static overlay endorsed by the game's creator); here the marks are generated from the live calibration, so they stay correct as it refits. |
 | **Blue dashed line** | The detected lane. |
 
+### The catch window, and why you have to aim under it
+
+v2.6 stopped fitting the cast curve and took it from the game instead. The minigame was pulled out of the client and reimplemented offline (from `scripts.ActorEvents_229._event_Minigames1`), and the cast turns out to be a dozen lines: holding advances an angle one degree every 10 ms update from 90, the gauge shows `1 - |sin(angle)|`, releasing launches the bobber at `(0.4 + 2.06p, -1.4 - 1.45p)` under gravity `0.05`, and the update that would carry it past the water does not move it at all. Transcribed into the helper it reproduces the offline module's own landings to 4e-13 of a lane unit, and agrees with the 19 casts the old parabola was fitted to better than that parabola did.
+
+Two things come out of it that a fitted curve could not give.
+
+**The gauge is a ladder of 91 rungs**, one per update of the hold, and they are not evenly spaced — `|cos|` is the rate, so the fill crawls off the bottom and sprints at the top. One rung moves the landing 0.8 lane units at 6% fill and 6.6 at full.
+
+**So a catch window is countable**, and small. Measured across every position each species can spawn at:
+
+| | tolerance | window | |
+|---|---|---|---|
+| fish | 15 units | 5–21 rungs | 50–210 ms, mean 90 |
+| eel | 16 units | 5–8 rungs | 50–80 ms, mean 61 |
+| squid | 18 units | 3–7 rungs | 30–70 ms, mean 56 |
+| whale | 23 units | 3–9 rungs | 30–90 ms, mean 69 |
+
+Nothing is ever out of reach — a full cast stops at 93% of the lane and fish spawn out to 96%, which is still inside a fish's own tolerance — but the far half of the lane is a 30-to-70 ms window. That is what makes a late release so expensive out there: **a release 30 ms late lands 3 lane units further out at the bottom of the gauge and 18 at the top**, against windows of 15 to 23. Thirty milliseconds is a frame and a half.
+
+Which is the whole of "if I aim at the mark I sail past it, and if I aim under it I catch". **tuning > Release lead** is where to put that number: it is how long after you decide to let go the game actually locks the power in — your reaction, the browser's event, the frame you were looking at already being a frame old. Every mark is then drawn that much early, and the live arrow looks that much ahead. It is seeded at 0 because it is yours and not the game's, and the status line measures it for you: it attributes each cast to the mark it came closest to and reports how late your releases are still landing. **Use the measured lead** folds that reading into the setting; when the readout sits at 0 ms, the marks are where you should let go.
+
 ### Calibration
 
-The power-to-distance mapping is seeded from measured casts and then refit from your own — every cast that lands is recorded as a `(power, landing)` pair (20 kept, in `fish_cfg`). Straight out of the box the marker lands within about 3% of the lane, and it tightens as you fish. **Reset aim calibration** clears the learned pairs.
+All that is still learned from your casts is where the lane sits: the near end and the width, in the game's own units, fitted as a straight line through `(power, landing)` pairs (20 kept, in `fish_cfg`). Two free parameters instead of three, and no shape to get wrong — the curve is the game's and cannot bend. **Reset aim calibration** clears the learned pairs.
+
+> **The catch window was in the code for two versions and never once drew.** v2.4 added the tolerance to the species table and drew a bar as wide as it; the field was never copied onto the detected fish, so the draw read `undefined`, `(f.catchN || 0) * laneW` came out 0, and both the lane bar and the gauge band collapsed to nothing every frame. It looked exactly like a helper that only draws a line, because that is what it was.
 
 > **v1.8–v2.0 fixed two things that made the marker miss.**
 >
