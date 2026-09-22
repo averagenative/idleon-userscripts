@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         IdleOn Fishing Helper
 // @namespace    nativerobot
-// @version      2.7
+// @version      2.8
 // @downloadURL https://raw.githubusercontent.com/averagenative/idleon-userscripts/main/idleon-fishing.user.js
 // @updateURL   https://raw.githubusercontent.com/averagenative/idleon-userscripts/main/idleon-fishing.user.js
 // @description  Draws where your cast will land, plus fish and hazard markers, for the IdleOn fishing minigame
@@ -29,6 +29,7 @@
     on: true,
     scale: 4,
     marks: true,       // ring the fish and the hazards
+    ink: true,         // draw the species marks in the dark palette, not the neon one
     aim: true,         // live landing marker while the power bar charges
     arc: true,         // dotted arc for a bobber already in the air
     ruler: true,       // numbered 0-8 graduations on the gauge and lane
@@ -152,6 +153,7 @@
         <button class="btn go" id="run">Show helper  (F4)</button>
         <div class="row"><label>Aim marker</label><input id="aim" type="checkbox"></div>
         <div class="row"><label>Fish / hazards</label><input id="marks" type="checkbox"></div>
+        <div class="row"><label>Dark marks</label><input id="ink" type="checkbox"></div>
         <div class="row"><label>Cast arc</label><input id="arcx" type="checkbox"></div>
         <div class="row"><label>Ruler 0–8</label><input id="ruler" type="checkbox"></div>
         <div class="row"><label>Lead the fish</label><input id="bob" type="checkbox"></div>
@@ -190,6 +192,7 @@
 
   function sync() {
     $('#aim').checked = cfg.aim; $('#marks').checked = cfg.marks;
+    $('#ink').checked = cfg.ink;
     $('#arcx').checked = cfg.arc; $('#ruler').checked = cfg.ruler;
     $('#bob').checked = cfg.bob;
     $('#debug').checked = cfg.debug; $('#lead').value = cfg.lead | 0;
@@ -358,11 +361,64 @@
   // is read through — one number describing how wide this lane is, used for
   // both, instead of a constant here that could disagree with it. A fraction is
   // what survives a resize; raw pixels would not.
+  //
+  // Two sets of colours to draw them in. The species marks are the one thing
+  // here drawn across BOTH of the minigame's backgrounds: the band and the ring
+  // sit on the lane, which is dark water, while the gauge band and the labels
+  // climb into the bright sky above it. No single colour wins on both, which is
+  // why this is two sets and a halo rather than one set of colours.
+  //
+  // WCAG contrast of each fill against the two backgrounds it is drawn over,
+  // sampled off a Blunder Hills frame (sky ~#9fd8f0, L .63; lane water
+  // ~#2a6f97, L .14) and against the halo behind it:
+  //
+  //             on sky   on water   on white
+  //   neon  FISH   1.12     3.16       1.74
+  //         EEL    1.01     3.59       1.53   <- the worst of them: yellow at
+  //         SQUID  1.59     2.23       2.46      L .64 is the sky's own
+  //         WHALE  1.64     2.16       2.54      luminance, to two decimals
+  //   ink   FISH   3.24     1.10       5.02
+  //         EEL    3.18     1.12       4.92
+  //         SQUID  4.08     1.15       6.32
+  //         WHALE  4.33     1.22       6.70
+  //
+  // The neon set is Tailwind's 400 weights, and the table says what is wrong
+  // with it: over the sky every one of them is between 1.0 and 1.7, and 1.0 is
+  // the number for "not there". The gauge band and the species label are the
+  // two marks you actually read while charging, and both live up there.
+  //
+  // The ink set is the 700 weights, which buys 3.2-4.3 over the sky - roughly
+  // triple the separation - and gives up the water in exchange, dropping to
+  // 1.10-1.22. That trade is only survivable because the halo flips with the
+  // palette: dark ink gets a WHITE halo instead of the neon set's black one.
+  // The last column is why that works and why it had to come with the colours -
+  // the ink set reads 4.9 to 6.7 against white, where the neon set manages 1.5
+  // to 2.5, so a white halo under neon would have been no halo at all. Ink
+  // alone would have moved the problem from the sky to the lane; ink plus the
+  // halo puts a 5.5:1 edge (white on water) around every mark that needs one.
+  //
+  // Hues stay distinct after the darkening, which is the other thing that could
+  // have broken: green 142 deg, amber 36, magenta 295, blue 224.
+  const PALETTE = {
+    neon: { FISH: '#4ade80', EEL: '#facc15', SQUID: '#e879f9', WHALE: '#60a5fa',
+            halo: 'rgba(0,0,0,.6)' },
+    ink:  { FISH: '#15803d', EEL: '#a16207', SQUID: '#a21caf', WHALE: '#1d4ed8',
+            halo: 'rgba(255,255,255,.85)' },
+  };
+  const spCol = name => PALETTE[cfg.ink ? 'ink' : 'neon'][name];
+  const spHalo = () => PALETTE[cfg.ink ? 'ink' : 'neon'].halo;
+  // The alphas below were all chosen for the neon set, where the fill is bright
+  // and a 0.16 wash still glows. Half the luminance needs more of it to read as
+  // the same weight of mark, so every species alpha goes through here. 1.75 is
+  // taste, not measurement - it is where the two sets look like the same mark
+  // side by side - but it is applied in one place so it stays adjustable.
+  const inkA = a => cfg.ink ? Math.min(1, a * 1.75) : a;
+
   const SPECIES = [
-    { name: 'FISH',  pts: 1, color: '#4ade80', test: isFish,  catchU: 15 },
-    { name: 'EEL',   pts: 2, color: '#facc15', test: isEel,   catchU: 16 },
-    { name: 'SQUID', pts: 3, color: '#e879f9', test: isSquid, catchU: 18 },
-    { name: 'WHALE', pts: 5, color: '#60a5fa', test: isWhale, catchU: 23 },
+    { name: 'FISH',  pts: 1, test: isFish,  catchU: 15 },
+    { name: 'EEL',   pts: 2, test: isEel,   catchU: 16 },
+    { name: 'SQUID', pts: 3, test: isSquid, catchU: 18 },
+    { name: 'WHALE', pts: 5, test: isWhale, catchU: 23 },
   ];
   const HAZARD_U = 19;                 // pufferfish, type 5, size 13
   const tolFrac = u => u / cfg.aimUW;
@@ -1105,9 +1161,13 @@
   let bob = null, bobHist = [], lastBobT = 0;
   let charge = 0, chargeSeen = 0, hold = null;
 
-  function drawLaneMark(x, y, color, label, sub) {
+  // `halo` is the colour of the drop shadow the ring and its text sit on, and
+  // it is a parameter because it has to flip with the palette: a dark ring needs
+  // a light halo to survive the lane water, and the hazard's own bright red
+  // still wants the black one. Defaulted so the hazard call is unchanged.
+  function drawLaneMark(x, y, color, label, sub, halo) {
     octx.save();
-    octx.shadowColor = 'rgba(0,0,0,.6)'; octx.shadowBlur = 3;
+    octx.shadowColor = halo || 'rgba(0,0,0,.6)'; octx.shadowBlur = 3;
     octx.strokeStyle = color; octx.lineWidth = 2.5;
     octx.beginPath(); octx.arc(x, y, 11, 0, Math.PI * 2); octx.stroke();
     octx.fillStyle = color; octx.font = 'bold 11px monospace';
@@ -1222,7 +1282,10 @@
             // versions. It looked exactly like a helper that only draws a line,
             // because that is what it was. Anything SPECIES carries that the
             // drawing needs has to be copied here.
-            fish.push({ ...o, name: sp.name, pts: sp.pts, color: sp.color, catchU: sp.catchU });
+            // The colour is resolved HERE rather than carried on SPECIES, so
+            // flipping the palette takes effect on the next frame instead of
+            // needing a reload - the whole point of it being a toggle.
+            fish.push({ ...o, name: sp.name, pts: sp.pts, color: spCol(sp.name), catchU: sp.catchU });
       const bobs2 = raw(isBobber, 60 * px * px);
       landed = bobs2.sort((a, b) => b.n - a.n)[0] || null;
       // The bobber is red too, so it lands in the hazard mask. Drop clusters
@@ -1283,16 +1346,16 @@
       // units, which is wider than a whale.
       const bandH = Math.max(5, Math.round(laneW * 0.018));
       octx.save();
-      octx.shadowColor = 'rgba(0,0,0,.6)'; octx.shadowBlur = 2;
+      octx.shadowColor = spHalo(); octx.shadowBlur = 2;
       for (const f of fish) {
         const r = tolFrac(f.catchU) * laneW;
         if (r <= 0 || !f.plan) continue;
         const cx = xOf(f.plan.at);
         octx.fillStyle = octx.strokeStyle = f.color;
         octx.setLineDash(f.tracked ? [] : [3, 3]);
-        octx.globalAlpha = f.tracked ? 0.16 : 0.08;
+        octx.globalAlpha = inkA(f.tracked ? 0.16 : 0.08);
         octx.fillRect(cx - r, f.y - bandH, r * 2, bandH * 2);
-        octx.globalAlpha = f.tracked ? 0.55 : 0.4; octx.lineWidth = 2;
+        octx.globalAlpha = inkA(f.tracked ? 0.55 : 0.4); octx.lineWidth = 2;
         octx.beginPath();
         octx.moveTo(cx - r, f.y - bandH); octx.lineTo(cx - r, f.y + bandH);
         octx.moveTo(cx + r, f.y - bandH); octx.lineTo(cx + r, f.y + bandH);
@@ -1301,7 +1364,7 @@
         // the same object as the band: one hairline, no fill, so it reads as
         // "the fish is going there" and never as "this is catchable".
         if (Math.abs(cx - f.x) > 3) {
-          octx.setLineDash([2, 4]); octx.globalAlpha = 0.5; octx.lineWidth = 1;
+          octx.setLineDash([2, 4]); octx.globalAlpha = inkA(0.5); octx.lineWidth = 1;
           octx.beginPath(); octx.moveTo(f.x, f.y); octx.lineTo(cx, f.y); octx.stroke();
         }
         octx.setLineDash([]);
@@ -1315,7 +1378,7 @@
       for (const f of fish) {
         const w = f.plan;
         drawLaneMark(f.x, f.y, f.color, `${f.name} +${f.pts}`,
-                     w ? `${(leadBack(w.mid) * 100) | 0}% · ${w.n * 10}ms` : null);
+                     w ? `${(leadBack(w.mid) * 100) | 0}% · ${w.n * 10}ms` : null, spHalo());
       }
       // A hazard with a catch sitting on it is not a hazard. Land there and the
       // catch is what you get — which is why the aim marker below already lets
@@ -1374,7 +1437,7 @@
     if (cfg.marks && m && fish.length) {
       const tx = m.x * kx, gy = p => (m.bot - p * (m.bot - m.top)) * ky;
       octx.save();
-      octx.shadowColor = 'rgba(0,0,0,.6)'; octx.shadowBlur = 3;
+      octx.shadowColor = spHalo(); octx.shadowBlur = 3;
       for (const f of fish) {
         const w = f.plan;
         if (!w) continue;
@@ -1387,9 +1450,9 @@
         for (const [i0, i1] of w.runs) {
           const yLo = gy(leadBack(CAST[i0].p)), yHi = gy(leadBack(CAST[i1].p));
           const h = Math.abs(yHi - yLo);
-          octx.globalAlpha = f.tracked ? 0.3 : 0.15;
+          octx.globalAlpha = inkA(f.tracked ? 0.3 : 0.15);
           octx.fillRect(tx - 12, Math.min(yLo, yHi), 20, Math.max(1, h));
-          octx.globalAlpha = f.tracked ? 0.9 : 0.5; octx.lineWidth = 2;
+          octx.globalAlpha = inkA(f.tracked ? 0.9 : 0.5); octx.lineWidth = 2;
           octx.beginPath();
           octx.moveTo(tx - 12, yLo); octx.lineTo(tx + 8, yLo);
           octx.moveTo(tx - 12, yHi); octx.lineTo(tx + 8, yHi);
@@ -1400,7 +1463,7 @@
           // they are far enough apart to read: a 21-rung fish window is about
           // 14px of gauge, and 21 lines in 14px is a smear, not a count.
           if (h / (i1 - i0 + 1) >= 3) {
-            octx.globalAlpha = 0.45; octx.lineWidth = 1;
+            octx.globalAlpha = inkA(0.45); octx.lineWidth = 1;
             octx.beginPath();
             for (let i = i0; i <= i1; i++) {
               const y = gy(leadBack(CAST[i].p));
@@ -1410,7 +1473,7 @@
           }
         }
         // The middle rung, where the old tick used to be.
-        octx.globalAlpha = 0.55; octx.lineWidth = 1; octx.setLineDash([]);
+        octx.globalAlpha = inkA(0.55); octx.lineWidth = 1; octx.setLineDash([]);
         octx.beginPath();
         octx.moveTo(tx - 12, gy(leadBack(w.mid))); octx.lineTo(tx + 8, gy(leadBack(w.mid)));
         octx.stroke();
@@ -1624,6 +1687,7 @@
   runBtn.onclick = toggle;
   $('#aim').onchange   = e => { cfg.aim = e.target.checked; save(); };
   $('#marks').onchange = e => { cfg.marks = e.target.checked; save(); };
+  $('#ink').onchange   = e => { cfg.ink = e.target.checked; save(); };
   $('#arcx').onchange  = e => { cfg.arc = e.target.checked; save(); };
   $('#ruler').onchange = e => { cfg.ruler = e.target.checked; save(); };
   $('#bob').onchange   = e => { cfg.bob = e.target.checked; tracks = []; save(); };

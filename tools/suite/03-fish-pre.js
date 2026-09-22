@@ -23,6 +23,7 @@
         <button class="btn go" id="run">Show helper  (F4)</button>
         <div class="row"><label>Aim marker</label><input id="aim" type="checkbox"></div>
         <div class="row"><label>Fish / hazards</label><input id="marks" type="checkbox"></div>
+        <div class="row"><label>Dark marks</label><input id="ink" type="checkbox"></div>
         <div class="row"><label>Cast arc</label><input id="arcx" type="checkbox"></div>
         <div class="row"><label>Ruler 0–8</label><input id="ruler" type="checkbox"></div>
         <div class="row"><label>Lead the fish</label><input id="bob" type="checkbox"></div>
@@ -46,6 +47,7 @@
 
       function sync() {
         $('#aim').checked = cfg.aim; $('#marks').checked = cfg.marks;
+        $('#ink').checked = cfg.ink;
         $('#arcx').checked = cfg.arc; $('#ruler').checked = cfg.ruler;
         $('#bob').checked = cfg.bob;
         $('#debug').checked = cfg.debug; $('#lead').value = cfg.lead | 0;
