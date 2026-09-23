@@ -30,6 +30,9 @@
         </div>
         <button class="btn arm" id="set">Set Position</button>
         <div class="row"><label>XY</label><span id="xy">—</span></div>
+        <div class="row"><label>Unfocused</label>
+          <div class="seg"><button data-a="1">Run</button><button data-a="0">Pause</button></div>
+        </div>
         <div class="hint">F8 toggle · F9 panic-off · F10 hide</div>`,
 
     init(ui) {
@@ -51,9 +54,20 @@
       // leaving for a panel names that element instead and does not count.
       ui.on(document, 'mouseout', e => { if (!e.relatedTarget) ptrIn = false; }, true);
 
+      // Swallow the window blur / visibilitychange that makes the game pause
+      // itself on alt-tab. See "keep the game awake" in the standalone clicker
+      // for what the game does with them and what this cannot fix. Registered
+      // through ui.on so that switching the clicker off takes it away too.
+      const swallowFocusLoss = e => {
+        if (cfg.awake && (e.target === window || e.target === document)) e.stopImmediatePropagation();
+      };
+      ui.on(window, 'blur', swallowFocusLoss, true);
+      ui.on(window, 'visibilitychange', swallowFocusLoss, true);
+
       function sync() {
         ivMinEl.value = cfg.ivMin; ivMaxEl.value = cfg.ivMax; jpEl.value = cfg.jitterPx;
-        root.querySelectorAll('.seg button').forEach(b => b.classList.toggle('sel', b.dataset.m === cfg.mode));
+        root.querySelectorAll('.seg button[data-m]').forEach(b => b.classList.toggle('sel', b.dataset.m === cfg.mode));
+        root.querySelectorAll('.seg button[data-a]').forEach(b => b.classList.toggle('sel', b.dataset.a === (cfg.awake ? '1' : '0')));
         xyEl.textContent = cfg.mode !== 'fixed'
           ? (ptrIn ? '(follows cursor)' : 'cursor is in another window')
           : hasTarget() ? fixedPoint().map(Math.round).join(', ') : 'not set';
@@ -88,7 +102,8 @@
       ivMinEl.onchange = e => { cfg.ivMin = Math.max(20, +e.target.value); save(); };
       ivMaxEl.onchange = e => { cfg.ivMax = Math.max(20, +e.target.value); save(); };
       jpEl.onchange = e => { cfg.jitterPx = Math.max(0, +e.target.value); save(); };
-      root.querySelectorAll('.seg button').forEach(b => b.onclick = () => { cfg.mode = b.dataset.m; save(); sync(); });
+      root.querySelectorAll('.seg button[data-m]').forEach(b => b.onclick = () => { cfg.mode = b.dataset.m; save(); sync(); });
+      root.querySelectorAll('.seg button[data-a]').forEach(b => b.onclick = () => { cfg.awake = b.dataset.a === '1'; save(); sync(); });
 
       // panic stops the clicker outright; switching the helper off has to as
       // well, or a torn-down panel leaves a timer clicking with no way to see it.

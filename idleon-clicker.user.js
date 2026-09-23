@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         IdleOn Clicker
 // @namespace    nativerobot
-// @version      3.6
+// @version      3.7
 // @downloadURL https://raw.githubusercontent.com/averagenative/idleon-userscripts/main/idleon-clicker.user.js
 // @updateURL   https://raw.githubusercontent.com/averagenative/idleon-userscripts/main/idleon-clicker.user.js
 // @description  Stealthy in-page autoclicker panel for Legends of IdleOn (browser)
@@ -19,6 +19,7 @@
     ivMax: 1200,       // ms — upper bound; each click picks uniformly in [min, max]
     jitterPx: 2,       // +/- position jitter in px (0 = pixel-perfect)
     mode: 'cursor',    // 'cursor' | 'fixed'
+    awake: true,       // keep the game running while the window is unfocused
     fx: 0, fy: 0,      // fixed target, viewport px (legacy / no-canvas fallback)
     fu: null, fv: null,// fixed target as a fraction of the game canvas rect
     collapsed: false,  // rolled up to just the title bar
@@ -53,6 +54,31 @@
   document.addEventListener('mouseout', e => {
     if (!e.relatedTarget) ptrIn = false;
   }, true);
+
+  // ---------- keep the game awake ----------
+  // Alt-tabbing away pauses IdleOn, and the browser has nothing to do with it:
+  // the game does it to itself. Lime's HTML5 window (N.js, read 2026-09-23)
+  // listens for `blur` on window and `visibilitychange` on document, turns
+  // either into onDeactivate, and Stencyl's onFocusLost answers that by setting
+  // inFocus = false and firing whenFocusChanged. That is the pause. Chrome
+  // does not hide a page just because its window lost focus, so the game loop
+  // would keep running if the game let it.
+  //
+  // Both events are swallowed here in the capture phase, before any page
+  // listener sees them. Only events aimed at the window or document itself are
+  // touched: an element losing focus sends its own `blur` to that element,
+  // and those go through as normal. Lime's listeners are registered without
+  // capture, so this works even though document-idle registers after the game
+  // does. At the target, capture listeners run before non-capture ones.
+  //
+  // What this does not fix: a window that is minimised or on another
+  // workspace. Chrome really does hide that page and throttles
+  // requestAnimationFrame, and an event listener cannot undo that.
+  const swallowFocusLoss = e => {
+    if (cfg.awake && (e.target === window || e.target === document)) e.stopImmediatePropagation();
+  };
+  window.addEventListener('blur', swallowFocusLoss, true);
+  window.addEventListener('visibilitychange', swallowFocusLoss, true);
 
   // ---------- stealth UI host (closed shadow DOM, hidden from page JS) ----------
   const host = document.createElement('div');
@@ -109,6 +135,9 @@
         </div>
         <button class="btn arm" id="set">Set Position</button>
         <div class="row"><label>XY</label><span id="xy">—</span></div>
+        <div class="row"><label>Unfocused</label>
+          <div class="seg"><button data-a="1">Run</button><button data-a="0">Pause</button></div>
+        </div>
         <div class="hint">F8 toggle · F9 panic-off · F10 hide</div>
       </div>
     </div>`;
@@ -134,7 +163,8 @@
   // ---------- UI sync ----------
   function sync() {
     ivMinEl.value = cfg.ivMin; ivMaxEl.value = cfg.ivMax; jpEl.value = cfg.jitterPx;
-    root.querySelectorAll('.seg button').forEach(b => b.classList.toggle('sel', b.dataset.m === cfg.mode));
+    root.querySelectorAll('.seg button[data-m]').forEach(b => b.classList.toggle('sel', b.dataset.m === cfg.mode));
+    root.querySelectorAll('.seg button[data-a]').forEach(b => b.classList.toggle('sel', b.dataset.a === (cfg.awake ? '1' : '0')));
     xyEl.textContent = cfg.mode !== 'fixed'
       ? (ptrIn ? '(follows cursor)' : 'cursor is in another window')
       : hasTarget() ? fixedPoint().map(Math.round).join(', ') : 'not set';
@@ -233,7 +263,8 @@
   ivMinEl.onchange = e => { cfg.ivMin = Math.max(20, +e.target.value); save(); };
   ivMaxEl.onchange = e => { cfg.ivMax = Math.max(20, +e.target.value); save(); };
   jpEl.onchange = e => { cfg.jitterPx = Math.max(0, +e.target.value); save(); };
-  root.querySelectorAll('.seg button').forEach(b => b.onclick = () => { cfg.mode = b.dataset.m; save(); sync(); });
+  root.querySelectorAll('.seg button[data-m]').forEach(b => b.onclick = () => { cfg.mode = b.dataset.m; save(); sync(); });
+  root.querySelectorAll('.seg button[data-a]').forEach(b => b.onclick = () => { cfg.awake = b.dataset.a === '1'; save(); sync(); });
   // Roll the panel up rather than hiding it outright — the title bar stays on
   // screen so it can always be clicked open again.
   minBtn.onclick = () => { cfg.collapsed = !cfg.collapsed; save(); sync(); };
