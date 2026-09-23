@@ -285,6 +285,9 @@
       .btn.sm { padding:4px; font-size:11px; }
       #st { color:#6b7280; font-size:11px; white-space:pre-line; min-height:28px; }
       .hint { color:#4b5563; font-size:11px; text-align:center; }
+      /* A setting that changes how the game itself behaves, not just what the
+         panel draws. It is bright so nobody forgets it is doing that. */
+      .loud { color:#ff3b3b; font-weight:700; }
       #min { cursor:pointer; color:#6b7280; padding:0 4px; }
       #nub { position: fixed; width: 13px; height: 13px; border-radius: 50%;
              background: var(--ac); opacity: .55; cursor: pointer;

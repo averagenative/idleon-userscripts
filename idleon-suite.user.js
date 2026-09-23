@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         IdleOn Helper Suite
 // @namespace    nativerobot
-// @version      1.61
+// @version      1.62
 // @downloadURL https://raw.githubusercontent.com/averagenative/idleon-userscripts/main/idleon-suite.user.js
 // @updateURL   https://raw.githubusercontent.com/averagenative/idleon-userscripts/main/idleon-suite.user.js
 // @description  All-in-one: autoclicker + Hoops, Fishing and Darts minigame helpers for Legends of IdleOn, each one individually switchable
@@ -285,6 +285,9 @@
       .btn.sm { padding:4px; font-size:11px; }
       #st { color:#6b7280; font-size:11px; white-space:pre-line; min-height:28px; }
       .hint { color:#4b5563; font-size:11px; text-align:center; }
+      /* A setting that changes how the game itself behaves, not just what the
+         panel draws. It is bright so nobody forgets it is doing that. */
+      .loud { color:#ff3b3b; font-weight:700; }
       #min { cursor:pointer; color:#6b7280; padding:0 4px; }
       #nub { position: fixed; width: 13px; height: 13px; border-radius: 50%;
              background: var(--ac); opacity: .55; cursor: pointer;
@@ -4706,7 +4709,7 @@
           <button id="lay-top" data-l="top">Top</button></span></div>
         <div class="row"><label>One helper at a time</label><input id="solo" type="checkbox"></div>
         <div class="row"><label>Auto-open active</label><input id="follow" type="checkbox"></div>
-        <div class="row"><label>Run while unfocused</label><input id="awake" type="checkbox"></div>
+        <div class="row"><label id="awake-l">Run while unfocused</label><input id="awake" type="checkbox"></div>
         <hr>
         <button class="btn sm" id="rollup">Minimise all</button>
         <button class="btn sm" id="panels">Hide all panels</button>
@@ -4739,6 +4742,7 @@
       hub.$('#solo').checked = !!suite.solo;
       hub.$('#follow').checked = !!suite.follow;
       hub.$('#awake').checked = !!suite.awake;
+      hub.$('#awake-l').classList.toggle('loud', !!suite.awake);
       // Both only bite in a dock; saying so beats leaving them looking broken.
       hub.$('#solo').disabled = hub.$('#follow').disabled = suite.layout === 'free';
       hub.chrome();
@@ -4757,7 +4761,7 @@
       hub.$('#lay-' + l).onclick = () => { suite.layout = l; saveSuite(); syncLayout(); };
     hub.$('#solo').onchange = e => { suite.solo = e.target.checked; saveSuite(); };
     hub.$('#follow').onchange = e => { suite.follow = e.target.checked; saveSuite(); };
-    hub.$('#awake').onchange = e => { suite.awake = e.target.checked; saveSuite(); };
+    hub.$('#awake').onchange = e => { suite.awake = e.target.checked; saveSuite(); syncHub(); };
     onLayoutChange = syncHub;
 
     // Rolls every helper up to its title bar without hiding it — the panels
