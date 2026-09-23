@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         IdleOn Helper Suite
 // @namespace    nativerobot
-// @version      1.60
+// @version      1.61
 // @downloadURL https://raw.githubusercontent.com/averagenative/idleon-userscripts/main/idleon-suite.user.js
 // @updateURL   https://raw.githubusercontent.com/averagenative/idleon-userscripts/main/idleon-suite.user.js
 // @description  All-in-one: autoclicker + Hoops, Fishing and Darts minigame helpers for Legends of IdleOn, each one individually switchable
@@ -71,11 +71,35 @@
   // solo: opening a helper closes the other helpers. Only meaningful docked,
   // where they share a column; see the collapse handler.
   // follow: opt in to letting the active minigame open its own helper.
+  // awake: keep the game running while its window is unfocused; see below.
   const suite = Object.assign({ collapsed: false, hidden: false,
-                                layout: 'free', solo: true, follow: false },
+                                layout: 'free', solo: true, follow: false, awake: true },
                               JSON.parse(localStorage.getItem(SUITE_KEY) || '{}'));
   suite.enabled = Object.assign({}, ALL_ON, suite.enabled);
   const saveSuite = () => localStorage.setItem(SUITE_KEY, JSON.stringify(suite));
+
+  // ---------- keep the game awake ----------
+  // Alt-tabbing away pauses the whole game, not just a minigame. The game
+  // does this to itself. Lime's HTML5 window (N.js, read 2026-09-23) listens
+  // for `blur` on window and `visibilitychange` on document, turns either into
+  // onDeactivate, and Stencyl's onFocusLost answers with inFocus = false. That
+  // stops progress in open menus as well, such as a running upgrade screen.
+  // Chrome does not hide a page just because its window lost focus.
+  //
+  // This lives in the shell, not in a helper, so it holds with every helper
+  // switched off. Both events are swallowed in the capture phase, and only
+  // when they are aimed at the window or document itself. An element losing
+  // focus sends its own `blur` to that element and goes through as normal.
+  // Lime registers without capture, and capture listeners run first at the
+  // target, so the order of registration does not matter.
+  //
+  // Not fixable from here: a minimised window, or one on another workspace.
+  // Chrome really hides that page and throttles requestAnimationFrame.
+  const swallowFocusLoss = e => {
+    if (suite.awake && (e.target === window || e.target === document)) e.stopImmediatePropagation();
+  };
+  window.addEventListener('blur', swallowFocusLoss, true);
+  window.addEventListener('visibilitychange', swallowFocusLoss, true);
 
   // ---------- the game canvas ----------
   // Largest canvas on the page is the game; anything smaller is a UI element.
@@ -566,9 +590,6 @@
         </div>
         <button class="btn arm" id="set">Set Position</button>
         <div class="row"><label>XY</label><span id="xy">—</span></div>
-        <div class="row"><label>Unfocused</label>
-          <div class="seg"><button data-a="1">Run</button><button data-a="0">Pause</button></div>
-        </div>
         <div class="hint">F8 toggle · F9 panic-off · F10 hide</div>`,
 
     init(ui) {
@@ -590,20 +611,9 @@
       // leaving for a panel names that element instead and does not count.
       ui.on(document, 'mouseout', e => { if (!e.relatedTarget) ptrIn = false; }, true);
 
-      // Swallow the window blur / visibilitychange that makes the game pause
-      // itself on alt-tab. See "keep the game awake" in the standalone clicker
-      // for what the game does with them and what this cannot fix. Registered
-      // through ui.on so that switching the clicker off takes it away too.
-      const swallowFocusLoss = e => {
-        if (cfg.awake && (e.target === window || e.target === document)) e.stopImmediatePropagation();
-      };
-      ui.on(window, 'blur', swallowFocusLoss, true);
-      ui.on(window, 'visibilitychange', swallowFocusLoss, true);
-
       function sync() {
         ivMinEl.value = cfg.ivMin; ivMaxEl.value = cfg.ivMax; jpEl.value = cfg.jitterPx;
         root.querySelectorAll('.seg button[data-m]').forEach(b => b.classList.toggle('sel', b.dataset.m === cfg.mode));
-        root.querySelectorAll('.seg button[data-a]').forEach(b => b.classList.toggle('sel', b.dataset.a === (cfg.awake ? '1' : '0')));
         xyEl.textContent = cfg.mode !== 'fixed'
           ? (ptrIn ? '(follows cursor)' : 'cursor is in another window')
           : hasTarget() ? fixedPoint().map(Math.round).join(', ') : 'not set';
@@ -700,7 +710,6 @@
       ivMaxEl.onchange = e => { cfg.ivMax = Math.max(20, +e.target.value); save(); };
       jpEl.onchange = e => { cfg.jitterPx = Math.max(0, +e.target.value); save(); };
       root.querySelectorAll('.seg button[data-m]').forEach(b => b.onclick = () => { cfg.mode = b.dataset.m; save(); sync(); });
-      root.querySelectorAll('.seg button[data-a]').forEach(b => b.onclick = () => { cfg.awake = b.dataset.a === '1'; save(); sync(); });
 
       // panic stops the clicker outright; switching the helper off has to as
       // well, or a torn-down panel leaves a timer clicking with no way to see it.
@@ -4697,6 +4706,7 @@
           <button id="lay-top" data-l="top">Top</button></span></div>
         <div class="row"><label>One helper at a time</label><input id="solo" type="checkbox"></div>
         <div class="row"><label>Auto-open active</label><input id="follow" type="checkbox"></div>
+        <div class="row"><label>Run while unfocused</label><input id="awake" type="checkbox"></div>
         <hr>
         <button class="btn sm" id="rollup">Minimise all</button>
         <button class="btn sm" id="panels">Hide all panels</button>
@@ -4728,6 +4738,7 @@
         hub.$('#lay-' + l).classList.toggle('sel', suite.layout === l);
       hub.$('#solo').checked = !!suite.solo;
       hub.$('#follow').checked = !!suite.follow;
+      hub.$('#awake').checked = !!suite.awake;
       // Both only bite in a dock; saying so beats leaving them looking broken.
       hub.$('#solo').disabled = hub.$('#follow').disabled = suite.layout === 'free';
       hub.chrome();
@@ -4746,6 +4757,7 @@
       hub.$('#lay-' + l).onclick = () => { suite.layout = l; saveSuite(); syncLayout(); };
     hub.$('#solo').onchange = e => { suite.solo = e.target.checked; saveSuite(); };
     hub.$('#follow').onchange = e => { suite.follow = e.target.checked; saveSuite(); };
+    hub.$('#awake').onchange = e => { suite.awake = e.target.checked; saveSuite(); };
     onLayoutChange = syncHub;
 
     // Rolls every helper up to its title bar without hiding it — the panels

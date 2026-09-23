@@ -71,11 +71,35 @@
   // solo: opening a helper closes the other helpers. Only meaningful docked,
   // where they share a column; see the collapse handler.
   // follow: opt in to letting the active minigame open its own helper.
+  // awake: keep the game running while its window is unfocused; see below.
   const suite = Object.assign({ collapsed: false, hidden: false,
-                                layout: 'free', solo: true, follow: false },
+                                layout: 'free', solo: true, follow: false, awake: true },
                               JSON.parse(localStorage.getItem(SUITE_KEY) || '{}'));
   suite.enabled = Object.assign({}, ALL_ON, suite.enabled);
   const saveSuite = () => localStorage.setItem(SUITE_KEY, JSON.stringify(suite));
+
+  // ---------- keep the game awake ----------
+  // Alt-tabbing away pauses the whole game, not just a minigame. The game
+  // does this to itself. Lime's HTML5 window (N.js, read 2026-09-23) listens
+  // for `blur` on window and `visibilitychange` on document, turns either into
+  // onDeactivate, and Stencyl's onFocusLost answers with inFocus = false. That
+  // stops progress in open menus as well, such as a running upgrade screen.
+  // Chrome does not hide a page just because its window lost focus.
+  //
+  // This lives in the shell, not in a helper, so it holds with every helper
+  // switched off. Both events are swallowed in the capture phase, and only
+  // when they are aimed at the window or document itself. An element losing
+  // focus sends its own `blur` to that element and goes through as normal.
+  // Lime registers without capture, and capture listeners run first at the
+  // target, so the order of registration does not matter.
+  //
+  // Not fixable from here: a minimised window, or one on another workspace.
+  // Chrome really hides that page and throttles requestAnimationFrame.
+  const swallowFocusLoss = e => {
+    if (suite.awake && (e.target === window || e.target === document)) e.stopImmediatePropagation();
+  };
+  window.addEventListener('blur', swallowFocusLoss, true);
+  window.addEventListener('visibilitychange', swallowFocusLoss, true);
 
   // ---------- the game canvas ----------
   // Largest canvas on the page is the game; anything smaller is a UI element.

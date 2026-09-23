@@ -30,6 +30,7 @@
           <button id="lay-top" data-l="top">Top</button></span></div>
         <div class="row"><label>One helper at a time</label><input id="solo" type="checkbox"></div>
         <div class="row"><label>Auto-open active</label><input id="follow" type="checkbox"></div>
+        <div class="row"><label>Run while unfocused</label><input id="awake" type="checkbox"></div>
         <hr>
         <button class="btn sm" id="rollup">Minimise all</button>
         <button class="btn sm" id="panels">Hide all panels</button>
@@ -61,6 +62,7 @@
         hub.$('#lay-' + l).classList.toggle('sel', suite.layout === l);
       hub.$('#solo').checked = !!suite.solo;
       hub.$('#follow').checked = !!suite.follow;
+      hub.$('#awake').checked = !!suite.awake;
       // Both only bite in a dock; saying so beats leaving them looking broken.
       hub.$('#solo').disabled = hub.$('#follow').disabled = suite.layout === 'free';
       hub.chrome();
@@ -79,6 +81,7 @@
       hub.$('#lay-' + l).onclick = () => { suite.layout = l; saveSuite(); syncLayout(); };
     hub.$('#solo').onchange = e => { suite.solo = e.target.checked; saveSuite(); };
     hub.$('#follow').onchange = e => { suite.follow = e.target.checked; saveSuite(); };
+    hub.$('#awake').onchange = e => { suite.awake = e.target.checked; saveSuite(); };
     onLayoutChange = syncHub;
 
     // Rolls every helper up to its title bar without hiding it — the panels
