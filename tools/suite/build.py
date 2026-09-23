@@ -71,7 +71,10 @@ CLICK, HOOP, FISH, DART = ('idleon-clicker.user.js', 'idleon-hoops.user.js',
 cd, cm = config(CLICK); hd, hm = config(HOOP); fd, fm = config(FISH); dd, dm = config(DART)
 
 chunks = [
-    part('00-head.js'),
+    part('00-head.js',
+         AWAKE=region(CLICK, '---------- keep the game awake ----------',
+                      '---------- stealth UI host', drop_lines=('keepGameAwake(() => cfg.awake);',),
+                      indent=0)),
 
     part('01-clicker.js', DEFAULTS=cd, MIGRATE=cm,
          CLICKCORE=region(CLICK, '---------- target resolution ----------',

@@ -35,6 +35,12 @@
 (function () {
   'use strict';
 
+  // The suite's own frame loop stays on the real requestAnimationFrame. The
+  // wrapped one (see "keep the game awake") keeps running while the window is
+  // covered, which is right for the game and a waste for the helpers: they
+  // would read back and draw a canvas nobody can see, 25 times a second.
+  const requestAnimationFrame = window.requestAnimationFrame.bind(window);
+
   // ---------- make the game's backbuffer readable ----------
   // OpenFL exports to WebGL, whose drawing buffer is wiped after each compose
   // unless preserveDrawingBuffer is set, and getContext caches per canvas — so
@@ -78,28 +84,10 @@
   suite.enabled = Object.assign({}, ALL_ON, suite.enabled);
   const saveSuite = () => localStorage.setItem(SUITE_KEY, JSON.stringify(suite));
 
-  // ---------- keep the game awake ----------
-  // Alt-tabbing away pauses the whole game, not just a minigame. The game
-  // does this to itself. Lime's HTML5 window (N.js, read 2026-09-23) listens
-  // for `blur` on window and `visibilitychange` on document, turns either into
-  // onDeactivate, and Stencyl's onFocusLost answers with inFocus = false. That
-  // stops progress in open menus as well, such as a running upgrade screen.
-  // Chrome does not hide a page just because its window lost focus.
-  //
-  // This lives in the shell, not in a helper, so it holds with every helper
-  // switched off. Both events are swallowed in the capture phase, and only
-  // when they are aimed at the window or document itself. An element losing
-  // focus sends its own `blur` to that element and goes through as normal.
-  // Lime registers without capture, and capture listeners run first at the
-  // target, so the order of registration does not matter.
-  //
-  // Not fixable from here: a minimised window, or one on another workspace.
-  // Chrome really hides that page and throttles requestAnimationFrame.
-  const swallowFocusLoss = e => {
-    if (suite.awake && (e.target === window || e.target === document)) e.stopImmediatePropagation();
-  };
-  window.addEventListener('blur', swallowFocusLoss, true);
-  window.addEventListener('visibilitychange', swallowFocusLoss, true);
+/*__AWAKE__*/
+  // Lives in the shell, not in the clicker, so it holds with every helper
+  // switched off.
+  keepGameAwake(() => suite.awake);
 
   // ---------- the game canvas ----------
   // Largest canvas on the page is the game; anything smaller is a UI element.

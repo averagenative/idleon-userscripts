@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         IdleOn Helper Suite
 // @namespace    nativerobot
-// @version      1.62
+// @version      1.63
 // @downloadURL https://raw.githubusercontent.com/averagenative/idleon-userscripts/main/idleon-suite.user.js
 // @updateURL   https://raw.githubusercontent.com/averagenative/idleon-userscripts/main/idleon-suite.user.js
 // @description  All-in-one: autoclicker + Hoops, Fishing and Darts minigame helpers for Legends of IdleOn, each one individually switchable
@@ -34,6 +34,12 @@
 
 (function () {
   'use strict';
+
+  // The suite's own frame loop stays on the real requestAnimationFrame. The
+  // wrapped one (see "keep the game awake") keeps running while the window is
+  // covered, which is right for the game and a waste for the helpers: they
+  // would read back and draw a canvas nobody can see, 25 times a second.
+  const requestAnimationFrame = window.requestAnimationFrame.bind(window);
 
   // ---------- make the game's backbuffer readable ----------
   // OpenFL exports to WebGL, whose drawing buffer is wiped after each compose
@@ -79,27 +85,57 @@
   const saveSuite = () => localStorage.setItem(SUITE_KEY, JSON.stringify(suite));
 
   // ---------- keep the game awake ----------
-  // Alt-tabbing away pauses the whole game, not just a minigame. The game
-  // does this to itself. Lime's HTML5 window (N.js, read 2026-09-23) listens
-  // for `blur` on window and `visibilitychange` on document, turns either into
-  // onDeactivate, and Stencyl's onFocusLost answers with inFocus = false. That
-  // stops progress in open menus as well, such as a running upgrade screen.
-  // Chrome does not hide a page just because its window lost focus.
+  // Firefox (on Wayland at least) stops handing out animation frames when the
+  // game's window is covered, and IdleOn only moves forward on a frame. That
+  // alone would just pause it, but Stencyl's onUpdate (N.js, read 2026-09-23)
+  // credits at most 200 ms per frame, `200<=b&&(b=200)`, so a gap is not caught
+  // up afterwards: it is lost. Measured on the live game, 2026-09-23: over
+  // 78 s alt-tabbed away, frames stopped for 10.8 s, 18.8 s, 1.4 s and 0.9 s.
+  // That is about 45% of the time gone, and only the ore mined in the
+  // foreground was there on return.
   //
-  // This lives in the shell, not in a helper, so it holds with every helper
-  // switched off. Both events are swallowed in the capture phase, and only
-  // when they are aimed at the window or document itself. An element losing
-  // focus sends its own `blur` to that element and goes through as normal.
-  // Lime registers without capture, and capture listeners run first at the
-  // target, so the order of registration does not matter.
+  // Suppressing the game's blur and visibilitychange handlers, as 3.7 did, has
+  // no effect on this. Those set Stencyl's inFocus flag, and nothing reads it.
   //
-  // Not fixable from here: a minimised window, or one on another workspace.
-  // Chrome really hides that page and throttles requestAnimationFrame.
-  const swallowFocusLoss = e => {
-    if (suite.awake && (e.target === window || e.target === document)) e.stopImmediatePropagation();
-  };
-  window.addEventListener('blur', swallowFocusLoss, true);
-  window.addEventListener('visibilitychange', swallowFocusLoss, true);
+  // So requestAnimationFrame is wrapped. Callbacks queue here and go out on
+  // the next real frame as usual. Separately, a worker ticks every 40 ms, and
+  // if no frame has come for 60 ms the queue is run from that tick instead.
+  // A worker, because Firefox slows a hidden page's own timers to one a second,
+  // which would still lose 4/5 of every second to the 200 ms cap. Its timers
+  // it leaves alone: same session, 172 s away, worker ticks were never more
+  // than 216 ms apart, the longest gap between game updates was 196 ms, and
+  // the ore came back at full rate (600+ in under 3 minutes).
+  //
+  // Lime looks up window.requestAnimationFrame again on every frame, so this
+  // works even when the wrap lands after the game has started. With `isOn()`
+  // false only the real frames run, which is plain requestAnimationFrame.
+  function keepGameAwake(isOn) {
+    const nativeRAF = window.requestAnimationFrame.bind(window);
+    let pending = new Map(), nextId = 1, armed = false, last = performance.now();
+    const flush = t => {
+      last = performance.now();
+      const run = pending; pending = new Map();
+      for (const cb of run.values()) {
+        try { cb(t); } catch (e) { setTimeout(() => { throw e; }); }
+      }
+    };
+    window.requestAnimationFrame = cb => {
+      const id = nextId++;
+      pending.set(id, cb);
+      if (!armed) { armed = true; nativeRAF(t => { armed = false; flush(t); }); }
+      return id;
+    };
+    window.cancelAnimationFrame = id => { pending.delete(id); };
+    const beat = new Worker(URL.createObjectURL(
+      new Blob(['setInterval(() => postMessage(0), 40)'], { type: 'text/javascript' })));
+    beat.onmessage = () => {
+      const now = performance.now();
+      if (isOn() && pending.size && now - last > 60) flush(now);
+    };
+  }
+  // Lives in the shell, not in the clicker, so it holds with every helper
+  // switched off.
+  keepGameAwake(() => suite.awake);
 
   // ---------- the game canvas ----------
   // Largest canvas on the page is the game; anything smaller is a UI element.
