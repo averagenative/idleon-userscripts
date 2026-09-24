@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         IdleOn Helper Suite
 // @namespace    nativerobot
-// @version      1.64
+// @version      1.65
 // @downloadURL https://raw.githubusercontent.com/averagenative/idleon-userscripts/main/idleon-suite.user.js
 // @updateURL   https://raw.githubusercontent.com/averagenative/idleon-userscripts/main/idleon-suite.user.js
 // @description  All-in-one: autoclicker + Hoops, Fishing and Darts minigame helpers for Legends of IdleOn, each one individually switchable
@@ -3319,7 +3319,18 @@
               octx.setLineDash([2, 4]); octx.globalAlpha = inkA(0.5); octx.lineWidth = 1;
               octx.beginPath(); octx.moveTo(f.x, f.y); octx.lineTo(cx, f.y); octx.stroke();
             }
+            // A thick bar through the middle of the band, where the fish will be
+            // when the cast lands. The band's edges say how far off you can be;
+            // this says what you are aiming at. The thin leader above runs from
+            // the sprite to this bar, so a fish that is on the move reads as
+            // "from here, to there". Solid either way: it is a position, and the
+            // band's dashing already says whether that position is tracked.
             octx.setLineDash([]);
+            octx.globalAlpha = inkA(f.tracked ? 0.9 : 0.6);
+            octx.lineWidth = Math.max(4, Math.round(laneW * 0.008));
+            octx.beginPath();
+            octx.moveTo(cx, f.y - bandH - 3); octx.lineTo(cx, f.y + bandH + 3);
+            octx.stroke();
           }
           octx.restore();
           // Left of each catch, the gauge fill to release at and how long the
@@ -3400,7 +3411,19 @@
             // to the highest would silently paint over a gap if it ever did — and
             // a gap is precisely the thing you would need to know about.
             for (const [i0, i1] of w.runs) {
-              const yLo = gy(leadBack(CAST[i0].p)), yHi = gy(leadBack(CAST[i1].p));
+              // The top edge is the FIRST MISSING rung, not the last good one.
+              // Release locks whatever the gauge is showing (g.pow in
+              // _event_MinigamesRELEASE), and the fill sits on the last good rung
+              // for a whole 10 ms update, so all of that update still catches; the
+              // miss starts only when the fill steps on to the next rung. Drawing
+              // the edge at the last good rung cut one full rung off the top of
+              // every window: a third of a 3-rung squid window, and up to 6.6 lane
+              // units of landing at the top of the gauge, where rungs are widest.
+              // It also made the band n-1 rungs tall beside a label reading n*10ms.
+              // Past the last rung there is nothing to step on to; the full gauge is
+              // the edge.
+              const top = Math.min(i1 + 1, CAST.length - 1);
+              const yLo = gy(leadBack(CAST[i0].p)), yHi = gy(leadBack(CAST[top].p));
               const h = Math.abs(yHi - yLo);
               octx.globalAlpha = inkA(f.tracked ? 0.3 : 0.15);
               octx.fillRect(tx - 12, Math.min(yLo, yHi), 20, Math.max(1, h));
