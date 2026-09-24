@@ -30,15 +30,17 @@
         </div>
         <button class="btn arm" id="set">Set Position</button>
         <div class="row"><label>XY</label><span id="xy">—</span></div>
+        <div class="row"><label>Skills</label><span><input id="sks" type="number" min="1" step="1"> s</span></div>
+        <div class="seg" id="skk">${[1,2,3,4,5,6,7,8,9].map(k => `<button data-k="${k}" style="flex:1;padding:3px 0">${k}</button>`).join('')}</div>
         <div class="hint">F8 toggle · F9 panic-off · F10 hide</div>`,
 
     init(ui) {
       const cfg = clicker.cfg, save = clicker.save;
       const $ = ui.$, root = ui.root, runBtn = ui.runBtn, dot = ui.dot;
       const ivMinEl = $('#ivmin'), ivMaxEl = $('#ivmax'), jpEl = $('#jp'),
-            xyEl = $('#xy'), setBtn = $('#set');
+            xyEl = $('#xy'), setBtn = $('#set'), sksEl = $('#sks');
 
-      let on = false, timer = null, capturing = false;
+      let on = false, timer = null, skTimer = null, capturing = false;
       // lastX/lastY only move while the pointer is over THIS window, so in a
       // second window they go stale on the way out and are 0,0 before it has
       // ever arrived. See the standalone clicker for the whole story; ptrIn is
@@ -54,6 +56,8 @@
       function sync() {
         ivMinEl.value = cfg.ivMin; ivMaxEl.value = cfg.ivMax; jpEl.value = cfg.jitterPx;
         root.querySelectorAll('.seg button[data-m]').forEach(b => b.classList.toggle('sel', b.dataset.m === cfg.mode));
+        sksEl.value = cfg.skSec;
+        root.querySelectorAll('.seg button[data-k]').forEach(b => b.classList.toggle('sel', cfg.skKeys.includes(+b.dataset.k)));
         xyEl.textContent = cfg.mode !== 'fixed'
           ? (ptrIn ? '(follows cursor)' : 'cursor is in another window')
           : hasTarget() ? fixedPoint().map(Math.round).join(', ') : 'not set';
@@ -89,6 +93,12 @@
       ivMaxEl.onchange = e => { cfg.ivMax = Math.max(20, +e.target.value); save(); };
       jpEl.onchange = e => { cfg.jitterPx = Math.max(0, +e.target.value); save(); };
       root.querySelectorAll('.seg button[data-m]').forEach(b => b.onclick = () => { cfg.mode = b.dataset.m; save(); sync(); });
+      sksEl.onchange = e => { cfg.skSec = Math.max(1, +e.target.value || 1); save(); skillRearm(); };
+      root.querySelectorAll('.seg button[data-k]').forEach(b => b.onclick = () => {
+        const k = +b.dataset.k;
+        cfg.skKeys = cfg.skKeys.includes(k) ? cfg.skKeys.filter(x => x !== k) : [...cfg.skKeys, k].sort();
+        save(); sync(); skillRearm();
+      });
 
       // panic stops the clicker outright; switching the helper off has to as
       // well, or a torn-down panel leaves a timer clicking with no way to see it.

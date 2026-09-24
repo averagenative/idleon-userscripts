@@ -80,6 +80,7 @@ The panel shows a status dot (green = running) and these controls:
 | **Target: Fixed** | Clicks a fixed point you set. |
 | **Set Position** | Arms capture — your next click sets the fixed target (and switches to Fixed mode). |
 | **XY** | Shows the current fixed target, or "(follows cursor)". |
+| **Skills / 1-9** | While clicking, press the highlighted skill-bar keys every *N* seconds (+0-10%), staggered a moment apart. None highlighted = off. Set *N* a little over the longest cooldown; a press on cooldown does nothing. |
 | **–** (header) | Roll the panel up to just its title bar. Click **+** to open it again. |
 
 Drag the panel by its header to move it. All settings persist in `localStorage` (`ac_cfg`).

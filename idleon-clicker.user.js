@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         IdleOn Clicker
 // @namespace    nativerobot
-// @version      3.8
+// @version      3.9
 // @downloadURL https://raw.githubusercontent.com/averagenative/idleon-userscripts/main/idleon-clicker.user.js
 // @updateURL   https://raw.githubusercontent.com/averagenative/idleon-userscripts/main/idleon-clicker.user.js
 // @description  Stealthy in-page autoclicker panel for Legends of IdleOn (browser)
@@ -20,6 +20,8 @@
     jitterPx: 2,       // +/- position jitter in px (0 = pixel-perfect)
     mode: 'cursor',    // 'cursor' | 'fixed'
     awake: true,       // keep the game running while the window is unfocused
+    skKeys: [],        // skill-bar keys (1-9) pressed while clicking; empty = off
+    skSec: 30,         // seconds between skill presses
     fx: 0, fy: 0,      // fixed target, viewport px (legacy / no-canvas fallback)
     fu: null, fv: null,// fixed target as a fraction of the game canvas rect
     collapsed: false,  // rolled up to just the title bar
@@ -36,7 +38,7 @@
   const save = () => localStorage.setItem(KEY, JSON.stringify(cfg));
 
   // ---------- state ----------
-  let on = false, timer = null, capturing = false;
+  let on = false, timer = null, skTimer = null, capturing = false;
   // lastX/lastY only move while the pointer is over THIS window. In a second
   // window — side by side, or simply not the one being pointed at — they go
   // stale the moment it leaves, and they are 0,0 before it has ever arrived.
@@ -161,6 +163,8 @@
         </div>
         <button class="btn arm" id="set">Set Position</button>
         <div class="row"><label>XY</label><span id="xy">—</span></div>
+        <div class="row"><label>Skills</label><span><input id="sks" type="number" min="1" step="1"> s</span></div>
+        <div class="seg" id="skk">${[1,2,3,4,5,6,7,8,9].map(k => `<button data-k="${k}" style="flex:1;padding:3px 0">${k}</button>`).join('')}</div>
         <div class="row"><label>Unfocused</label>
           <div class="seg"><button data-a="1">Run</button><button data-a="0">Pause</button></div>
         </div>
@@ -171,7 +175,7 @@
   const $ = s => root.querySelector(s);
   const dot = $('#dot'), runBtn = $('#run'), ivMinEl = $('#ivmin'), ivMaxEl = $('#ivmax'),
         jpEl = $('#jp'), xyEl = $('#xy'), setBtn = $('#set'), panel = $('#p'),
-        nub = $('#nub'), body = $('.body'), minBtn = $('#min');
+        nub = $('#nub'), body = $('.body'), minBtn = $('#min'), sksEl = $('#sks');
 
   // ---------- remembered panel position ----------
   // Where the panel was dragged to is kept in the same config as everything
@@ -190,6 +194,8 @@
   function sync() {
     ivMinEl.value = cfg.ivMin; ivMaxEl.value = cfg.ivMax; jpEl.value = cfg.jitterPx;
     root.querySelectorAll('.seg button[data-m]').forEach(b => b.classList.toggle('sel', b.dataset.m === cfg.mode));
+    sksEl.value = cfg.skSec;
+    root.querySelectorAll('.seg button[data-k]').forEach(b => b.classList.toggle('sel', cfg.skKeys.includes(+b.dataset.k)));
     root.querySelectorAll('.seg button[data-a]').forEach(b => b.classList.toggle('sel', b.dataset.a === (cfg.awake ? '1' : '0')));
     xyEl.textContent = cfg.mode !== 'fixed'
       ? (ptrIn ? '(follows cursor)' : 'cursor is in another window')
@@ -263,8 +269,44 @@
     timer = setTimeout(tick, Math.max(20, lo + Math.random() * (hi - lo)));
   }
 
-  function start() { if (!on) { on = true; sync(); tick(); } }
-  function stop()  { on = false; clearTimeout(timer); sync(); }
+  // Skill-bar keys, pressed on their own timer alongside the clicks. The game
+  // is Lime/Stencyl: its only key listener is on window, and it reads the key
+  // from `keyCode` (N.js handleKeyEvent, read 2026-09-24) — which a synthetic
+  // KeyboardEvent leaves at 0 whatever the init dict says, so it is defined on
+  // the event instead. Down and up are held apart for 60-140 ms because
+  // Stencyl turns keydown into a per-frame "pressed" flag; a press and release
+  // inside one frame gap can be cleared before any skill code looks at it.
+  // Several keys are staggered a quarter-second or so apart for the same
+  // reason, and so they do not land as one impossible chord. Pressing a skill
+  // that is still on cooldown does nothing, so an interval a little over the
+  // longest cooldown is the setting to use.
+  function pressKey(k) {
+    const code = 48 + k;
+    const send = type => {
+      const e = new KeyboardEvent(type, { key: String(k), code: 'Digit' + k, bubbles: true, cancelable: true });
+      Object.defineProperty(e, 'keyCode', { get: () => code });
+      Object.defineProperty(e, 'which',   { get: () => code });
+      window.dispatchEvent(e);
+    };
+    send('keydown');
+    setTimeout(() => send('keyup'), 60 + Math.random() * 80);
+  }
+
+  function skillTick() {
+    if (!on || !cfg.skKeys.length) return;
+    let t = 0;
+    for (const k of cfg.skKeys) {
+      setTimeout(() => { if (on) pressKey(k); }, t);
+      t += 200 + Math.random() * 250;
+    }
+    // +0-10%, never early: late only costs a moment of cooldown, and a fixed
+    // period is the most machine-like thing a clicker could do.
+    skTimer = setTimeout(skillTick, Math.max(1, cfg.skSec) * 1000 * (1 + Math.random() * 0.1));
+  }
+  function skillRearm() { clearTimeout(skTimer); if (on) skillTick(); }
+
+  function start() { if (!on) { on = true; sync(); tick(); skillTick(); } }
+  function stop()  { on = false; clearTimeout(timer); clearTimeout(skTimer); sync(); }
   function toggle(){ on ? stop() : start(); }
 
   // ---------- position capture ----------
@@ -290,6 +332,12 @@
   ivMaxEl.onchange = e => { cfg.ivMax = Math.max(20, +e.target.value); save(); };
   jpEl.onchange = e => { cfg.jitterPx = Math.max(0, +e.target.value); save(); };
   root.querySelectorAll('.seg button[data-m]').forEach(b => b.onclick = () => { cfg.mode = b.dataset.m; save(); sync(); });
+  sksEl.onchange = e => { cfg.skSec = Math.max(1, +e.target.value || 1); save(); skillRearm(); };
+  root.querySelectorAll('.seg button[data-k]').forEach(b => b.onclick = () => {
+    const k = +b.dataset.k;
+    cfg.skKeys = cfg.skKeys.includes(k) ? cfg.skKeys.filter(x => x !== k) : [...cfg.skKeys, k].sort();
+    save(); sync(); skillRearm();
+  });
   root.querySelectorAll('.seg button[data-a]').forEach(b => b.onclick = () => { cfg.awake = b.dataset.a === '1'; save(); sync(); });
   // Roll the panel up rather than hiding it outright — the title bar stays on
   // screen so it can always be clicked open again.
