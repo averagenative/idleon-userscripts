@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         IdleOn Fishing Helper
 // @namespace    nativerobot
-// @version      2.11
+// @version      2.12
 // @downloadURL https://raw.githubusercontent.com/averagenative/idleon-userscripts/main/idleon-fishing.user.js
 // @updateURL   https://raw.githubusercontent.com/averagenative/idleon-userscripts/main/idleon-fishing.user.js
 // @description  Draws where your cast will land, plus fish and hazard markers, for the IdleOn fishing minigame
@@ -1459,13 +1459,24 @@
           // round for the edge a late release falls off.
           const yLo = gy(leadBack(CAST[i0].p)), yHi = gy(leadBack(CAST[i1].p));
           const h = Math.abs(yHi - yLo);
-          octx.globalAlpha = inkA(f.tracked ? 0.3 : 0.15);
-          octx.fillRect(tx - 12, Math.min(yLo, yHi), 20, Math.max(1, h));
-          octx.globalAlpha = inkA(f.tracked ? 0.9 : 0.5); octx.lineWidth = 2;
-          octx.beginPath();
-          octx.moveTo(tx - 12, yLo); octx.lineTo(tx + 8, yLo);
-          octx.moveTo(tx - 12, yHi); octx.lineTo(tx + 8, yHi);
-          octx.stroke();
+          // Drawn as a closed box with a WHITE underlay, not the palette halo.
+          // The gauge is a dark brown pole, and the neon halo is black: a black
+          // edge on dark brown is no edge at all, and a 0.3 green wash over it
+          // was, in play, "still a little hard to see". White against the pole
+          // is the one pairing that reads whichever palette is on, so the box
+          // gets a 5px white stroke with the species colour laid over it.
+          const bx = tx - 14, bw = 24, by = Math.min(yLo, yHi), bh = Math.max(2, h);
+          octx.save();
+          octx.shadowBlur = 0;
+          octx.globalAlpha = inkA(f.tracked ? 0.5 : 0.25);
+          octx.fillRect(bx, by, bw, bh);
+          octx.globalAlpha = f.tracked ? 0.9 : 0.55;
+          octx.strokeStyle = '#fff'; octx.lineWidth = 5;
+          octx.strokeRect(bx, by, bw, bh);
+          octx.globalAlpha = f.tracked ? 1 : 0.7;
+          octx.strokeStyle = f.color; octx.lineWidth = 2.5;
+          octx.strokeRect(bx, by, bw, bh);
+          octx.restore();
           // One hairline per rung, each at the fill that rung really sits at —
           // they are not evenly spaced and drawing them as if they were would
           // throw away the only thing the ladder has to say. Drawn only while
@@ -1488,11 +1499,15 @@
         // the lane, over the fish, where it only restated where the fish was.
         // Wider than the band so it reads past the fill, solid either way; the
         // band's dashing already says whether the bob is tracked.
-        octx.globalAlpha = inkA(f.tracked ? 0.95 : 0.65); octx.setLineDash([]);
-        octx.lineWidth = 4;
-        octx.beginPath();
-        octx.moveTo(tx - 15, gy(leadBack(w.mid))); octx.lineTo(tx + 11, gy(leadBack(w.mid)));
-        octx.stroke();
+        // Same white underlay as the box, for the same reason.
+        const ym = gy(leadBack(w.mid));
+        octx.setLineDash([]);
+        octx.globalAlpha = f.tracked ? 0.95 : 0.6;
+        octx.strokeStyle = '#fff'; octx.lineWidth = 7;
+        octx.beginPath(); octx.moveTo(tx - 18, ym); octx.lineTo(tx + 14, ym); octx.stroke();
+        octx.globalAlpha = f.tracked ? 1 : 0.7;
+        octx.strokeStyle = f.color; octx.lineWidth = 4;
+        octx.beginPath(); octx.moveTo(tx - 17, ym); octx.lineTo(tx + 13, ym); octx.stroke();
       }
       octx.restore();
     }
