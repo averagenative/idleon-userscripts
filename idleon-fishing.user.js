@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         IdleOn Fishing Helper
 // @namespace    nativerobot
-// @version      2.10
+// @version      2.11
 // @downloadURL https://raw.githubusercontent.com/averagenative/idleon-userscripts/main/idleon-fishing.user.js
 // @updateURL   https://raw.githubusercontent.com/averagenative/idleon-userscripts/main/idleon-fishing.user.js
 // @description  Draws where your cast will land, plus fish and hazard markers, for the IdleOn fishing minigame
@@ -1448,19 +1448,16 @@
         // to the highest would silently paint over a gap if it ever did — and
         // a gap is precisely the thing you would need to know about.
         for (const [i0, i1] of w.runs) {
-          // The top edge is the FIRST MISSING rung, not the last good one.
-          // Release locks whatever the gauge is showing (g.pow in
-          // _event_MinigamesRELEASE), and the fill sits on the last good rung
-          // for a whole 10 ms update, so all of that update still catches; the
-          // miss starts only when the fill steps on to the next rung. Drawing
-          // the edge at the last good rung cut one full rung off the top of
-          // every window: a third of a 3-rung squid window, and up to 6.6 lane
-          // units of landing at the top of the gauge, where rungs are widest.
-          // It also made the band n-1 rungs tall beside a label reading n*10ms.
-          // Past the last rung there is nothing to step on to; the full gauge is
-          // the edge.
-          const top = Math.min(i1 + 1, CAST.length - 1);
-          const yLo = gy(leadBack(CAST[i0].p)), yHi = gy(leadBack(CAST[top].p));
+          // Both edges are rungs that CATCH, so a fill touching either line is
+          // still a catch. 2.9 moved the top edge up to the first rung that
+          // misses, on the reasoning that the fill sits on the last good rung
+          // for a whole 10 ms update and all of it still catches. True, and
+          // useless: it made the drawn line itself a miss, so letting go as the
+          // fill reached it — which is what anyone does with an edge — missed.
+          // Reported in play within the hour. The window as drawn is a rung
+          // shorter than the time the label counts; that is the right way
+          // round for the edge a late release falls off.
+          const yLo = gy(leadBack(CAST[i0].p)), yHi = gy(leadBack(CAST[i1].p));
           const h = Math.abs(yHi - yLo);
           octx.globalAlpha = inkA(f.tracked ? 0.3 : 0.15);
           octx.fillRect(tx - 12, Math.min(yLo, yHi), 20, Math.max(1, h));
