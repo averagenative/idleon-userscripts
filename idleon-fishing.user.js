@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         IdleOn Fishing Helper
 // @namespace    nativerobot
-// @version      2.9
+// @version      2.10
 // @downloadURL https://raw.githubusercontent.com/averagenative/idleon-userscripts/main/idleon-fishing.user.js
 // @updateURL   https://raw.githubusercontent.com/averagenative/idleon-userscripts/main/idleon-fishing.user.js
 // @description  Draws where your cast will land, plus fish and hazard markers, for the IdleOn fishing minigame
@@ -1367,18 +1367,7 @@
           octx.setLineDash([2, 4]); octx.globalAlpha = inkA(0.5); octx.lineWidth = 1;
           octx.beginPath(); octx.moveTo(f.x, f.y); octx.lineTo(cx, f.y); octx.stroke();
         }
-        // A thick bar through the middle of the band, where the fish will be
-        // when the cast lands. The band's edges say how far off you can be;
-        // this says what you are aiming at. The thin leader above runs from
-        // the sprite to this bar, so a fish that is on the move reads as
-        // "from here, to there". Solid either way: it is a position, and the
-        // band's dashing already says whether that position is tracked.
         octx.setLineDash([]);
-        octx.globalAlpha = inkA(f.tracked ? 0.9 : 0.6);
-        octx.lineWidth = Math.max(4, Math.round(laneW * 0.008));
-        octx.beginPath();
-        octx.moveTo(cx, f.y - bandH - 3); octx.lineTo(cx, f.y + bandH + 3);
-        octx.stroke();
       }
       octx.restore();
       // Left of each catch, the gauge fill to release at and how long the
@@ -1495,10 +1484,17 @@
             octx.stroke();
           }
         }
-        // The middle rung, where the old tick used to be.
-        octx.globalAlpha = inkA(0.55); octx.lineWidth = 1; octx.setLineDash([]);
+        // The middle rung, as a thick bar across the gauge: the fill to let go
+        // at. The band's edges say how much room there is either side; this
+        // says where to aim, and it has to be ON the gauge to be any use,
+        // because the gauge is what you watch while you hold. 2.9 put it on
+        // the lane, over the fish, where it only restated where the fish was.
+        // Wider than the band so it reads past the fill, solid either way; the
+        // band's dashing already says whether the bob is tracked.
+        octx.globalAlpha = inkA(f.tracked ? 0.95 : 0.65); octx.setLineDash([]);
+        octx.lineWidth = 4;
         octx.beginPath();
-        octx.moveTo(tx - 12, gy(leadBack(w.mid))); octx.lineTo(tx + 8, gy(leadBack(w.mid)));
+        octx.moveTo(tx - 15, gy(leadBack(w.mid))); octx.lineTo(tx + 11, gy(leadBack(w.mid)));
         octx.stroke();
       }
       octx.restore();
