@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         IdleOn Fishing Helper
 // @namespace    nativerobot
-// @version      2.12
+// @version      2.13
 // @downloadURL https://raw.githubusercontent.com/averagenative/idleon-userscripts/main/idleon-fishing.user.js
 // @updateURL   https://raw.githubusercontent.com/averagenative/idleon-userscripts/main/idleon-fishing.user.js
 // @description  Draws where your cast will land, plus fish and hazard markers, for the IdleOn fishing minigame
@@ -1436,7 +1436,29 @@
     // READ when you decide, not where it ends up once the release lands.
     if (cfg.marks && m && fish.length) {
       const tx = m.x * kx, gy = p => (m.bot - p * (m.bot - m.top)) * ky;
+      // Everything here stops at the pole's MIDLINE, leaving its right half
+      // bare. 2.12 ran the box and the bar most of the way across, and at 0.5
+      // alpha that covered the red fill you are meant to be watching rise into
+      // it — reported in play with a red line drawn down the middle: "only
+      // cover half of the power bar". Half the pole shows the fill, the other
+      // half shows the window, side by side.
+      //
+      // The midline comes off the game's own sprite, not a pixel offset:
+      // MGfshpow is 12 units wide with a 1-unit black outline, and tx is the
+      // leftmost column readMeter settles on, which is inner column 1 (the
+      // outline is black and fails isCase; column 1 ties for the longest run
+      // whether the fill is up or not, and the first of a tie wins — the fill
+      // sprite's pale columns 8-9 fail isBobber, so they only ever lose). So
+      // the middle is 5 units right of tx. A unit is totalPx/64 backing-store
+      // pixels — exactly 1 on a live canvas, 1.389 in a 750-tall recording —
+      // and W/cv.width takes those to overlay pixels. On the screenshot this
+      // was reported from, the pole spans x 33-49 and the drawn line averages
+      // x 40; this puts the midline at ~40.8.
+      const midX = tx + 5 * (m.totalPx / RUNGS) * (W / cv.width);
       octx.save();
+      // A clip as well as the geometry, so the halo and the strokes' outer
+      // halves cannot creep back across the line.
+      octx.beginPath(); octx.rect(0, 0, midX, H); octx.clip();
       octx.shadowColor = spHalo(); octx.shadowBlur = 3;
       for (const f of fish) {
         const w = f.plan;
@@ -1465,7 +1487,9 @@
           // was, in play, "still a little hard to see". White against the pole
           // is the one pairing that reads whichever palette is on, so the box
           // gets a 5px white stroke with the species colour laid over it.
-          const bx = tx - 14, bw = 24, by = Math.min(yLo, yHi), bh = Math.max(2, h);
+          // The right edge sits 2.5px inside the midline so the 5px white
+          // stroke, centred on it, ends exactly there instead of being clipped.
+          const bx = tx - 14, bw = midX - 2.5 - bx, by = Math.min(yLo, yHi), bh = Math.max(2, h);
           octx.save();
           octx.shadowBlur = 0;
           octx.globalAlpha = inkA(f.tracked ? 0.5 : 0.25);
@@ -1487,7 +1511,7 @@
             octx.beginPath();
             for (let i = i0; i <= i1; i++) {
               const y = gy(leadBack(CAST[i].p));
-              octx.moveTo(tx - 4, y); octx.lineTo(tx + 8, y);
+              octx.moveTo(tx - 4, y); octx.lineTo(bx + bw - 2, y);
             }
             octx.stroke();
           }
@@ -1497,17 +1521,18 @@
         // says where to aim, and it has to be ON the gauge to be any use,
         // because the gauge is what you watch while you hold. 2.9 put it on
         // the lane, over the fish, where it only restated where the fish was.
-        // Wider than the band so it reads past the fill, solid either way; the
-        // band's dashing already says whether the bob is tracked.
+        // Longer than the band on the left so it reads past it, level with the
+        // midline on the right like everything else; solid either way, since
+        // the band's dashing already says whether the bob is tracked.
         // Same white underlay as the box, for the same reason.
         const ym = gy(leadBack(w.mid));
         octx.setLineDash([]);
         octx.globalAlpha = f.tracked ? 0.95 : 0.6;
         octx.strokeStyle = '#fff'; octx.lineWidth = 7;
-        octx.beginPath(); octx.moveTo(tx - 18, ym); octx.lineTo(tx + 14, ym); octx.stroke();
+        octx.beginPath(); octx.moveTo(tx - 18, ym); octx.lineTo(midX, ym); octx.stroke();
         octx.globalAlpha = f.tracked ? 1 : 0.7;
         octx.strokeStyle = f.color; octx.lineWidth = 4;
-        octx.beginPath(); octx.moveTo(tx - 17, ym); octx.lineTo(tx + 13, ym); octx.stroke();
+        octx.beginPath(); octx.moveTo(tx - 17, ym); octx.lineTo(midX - 1, ym); octx.stroke();
       }
       octx.restore();
     }
