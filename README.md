@@ -280,8 +280,11 @@ Unlike the other two, this game gives you a **free aim**: the dart pivots contin
 |---|---|
 | **Dotted path** | Where the dart flies at your current aim, wind included. Coloured by the band it lands in. |
 | **Ring + label on the board** | The predicted hit point and its score (+1 / +2 / +3 / +5). |
+| **Click light** (disc left of the thrower) | **Green**: click now and the dart lands in the bullseye. **Yellow**: the next bullseye window opens within 0.4 s, and the white arc around the disc closes exactly when it turns green. **Red**: not now (the status line says "no bullseye this sweep" when the whole sweep has none). **Grey**: no prediction yet, or the dart is in the air. |
 
 **F2** toggles the path, **F1** hides the panel.
+
+The light works from the sweep the game itself uses: once a few frames of the aim are in, it fits the swing and looks ahead for when the aim crosses the bullseye. It starts at a **release lead** of 0 ms, because your reaction time is yours and not the game's. As you throw, the status line reports how early or late your releases land against the windows (for example `throws 40ms late`); **Use the measured lead** under tuning adds that to the lead. Negative leads are fine if you tend to click early.
 
 ### How the aim is read
 

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         IdleOn Helper Suite
 // @namespace    nativerobot
-// @version      1.69
+// @version      1.70
 // @downloadURL https://raw.githubusercontent.com/averagenative/idleon-userscripts/main/idleon-suite.user.js
 // @updateURL   https://raw.githubusercontent.com/averagenative/idleon-userscripts/main/idleon-suite.user.js
 // @description  All-in-one: autoclicker + Hoops, Fishing and Darts minigame helpers for Legends of IdleOn, each one individually switchable
@@ -3723,6 +3723,7 @@
         path: true,        // dotted flight path
         band: true,        // name the band you would hit
         live: true,        // track a dart already in the air
+        light: true,       // traffic light beside the thrower: click now / soon / not now
         debug: false,
         calVer: 6,
         // Confirmed v5 against 12 no-wind flights tracked at 1327.9x747, fitting
@@ -3779,6 +3780,20 @@
         // belongs to a later aim. That method cannot measure this and should not be
         // used to re-tune landN. Compare against the tracked flight instead.
         landN: 0,          // landing correction / height
+        // Milliseconds between you deciding to let go and the game locking the aim
+        // in -- your reaction, the browser's event, the frame you were looking at
+        // already being a frame old, all of it. It matters here because the sweep
+        // is FAST: around n=20 throws the arm moves ~120 deg/s through its middle
+        // (A*w = 43.8 * 156 deg/s * pi/180), so a release 30 ms late is ~3.6 deg off,
+        // which is most of a bullseye that is only 4.3-4.9 deg of aim wide on a
+        // 1328 canvas. The click light is drawn cfg.lead ahead of the real window so
+        // that clicking when it turns green locks the aim the window is about.
+        //
+        // Seeded at 0 because it is yours, not the game's, and nobody else's number
+        // would be honest here. The status line measures what your throws are
+        // actually doing against the windows; tuning > lead is where to put it.
+        lead: 0,           // ms
+        leadObs: [],       // recent signed release errors, in ms (+ = late), newest last
         // v6: magenta is NO LONGER gated, and v7 added red. The colour was never a
         // kind of wind, it is a strength tier — the game picks the arrow sprite as
         //     mag < 10 ? DartWind0 : mag < 18 ? DartWind1 : DartWind2
@@ -3799,6 +3814,7 @@
         cfg.calVer = 6; cfg.vN = 0.548; cfg.gN = 0.612; cfg.landN = 0;
         cfg.windK = 0.01389;
       }
+      if (!Array.isArray(cfg.leadObs)) cfg.leadObs = [];
   });
 
   const DARTS = {
@@ -3816,10 +3832,14 @@
         <div class="row"><label>Aim path</label><input id="path" type="checkbox"></div>
         <div class="row"><label>Name the band</label><input id="band" type="checkbox"></div>
         <div class="row"><label>Track thrown dart</label><input id="live" type="checkbox"></div>
+        <div class="row"><label>Click light</label><input id="light" type="checkbox"></div>
         <div id="st">idle</div>
         <details>
           <summary>tuning</summary>
           <div class="body">
+            <div class="row"><label>Release lead</label>
+              <span><input id="lead" type="number" min="-150" max="400" step="10" style="width:52px">ms</span></div>
+            <button class="btn sm" id="takelead">Use the measured lead</button>
             <div class="row"><label>Debug</label><input id="debug" type="checkbox"></div>
             <button class="btn sm" id="cal">Reset calibration</button>
           </div>
@@ -3834,6 +3854,7 @@
       function sync() {
         $('#path').checked = cfg.path; $('#band').checked = cfg.band;
         $('#live').checked = cfg.live; $('#debug').checked = cfg.debug;
+        $('#light').checked = cfg.light; $('#lead').value = cfg.lead | 0;
         dot.classList.toggle('on', cfg.on);
         runBtn.textContent = cfg.on ? 'Hide path  (F2)' : 'Show path  (F2)';
         runBtn.className = 'btn ' + (cfg.on ? 'stop' : 'go');
@@ -4248,6 +4269,7 @@
       // character had on: with the gold helmet the origin landed in the head, and
       // the march then found the torso rather than the dart. See the hand blob
       // search for the measurements.
+      const AIM_BIAS = 4.18;   // see the long note inside findAim
       function findAim(B, W, H, hx, hy) {
         const sx = B.sx / B.cvW * W, sy = B.sy / B.cvH * H;
         const kx = W / B.cvW, ky = H / B.cvH;
@@ -4424,7 +4446,8 @@
         // rows with the largest inferred gaps drive it. The flight record now
         // carries its own launch point (lx, ly) so the next session measures this
         // directly instead of inferring it; refine AIM_BIAS then, not before.
-        const AIM_BIAS = 4.18;
+        // AIM_BIAS is declared above findAim, at module scope, so the sweep model
+        // (SWEEP_C) can use the same number instead of a copy that could drift.
         return { x: sx + gx * kx, y: sy + gy * ky, deg: sd / sw + AIM_BIAS, reach: best.reach / scale };
       }
 
@@ -4445,6 +4468,11 @@
       let aimDeg = null, aimT = 0, lastAim = null, lastAimF = -99;
       let dartPts = [], lastDartT = 0, flightWind = 'none', flightAim = null;
       let prevFly = [], lastFlight = null, flightT0 = 0, flightLX = null, flightLY = null;
+      // click light: fresh aims since the arm last reappeared, the last accepted
+      // launch point, the current fit and its windows, and the last release
+      // attributed to a window.
+      let sweepS = [], launchPt = null, fit = null, wins = [], winsT = 0, lastRel = null;
+      let frameEma = 33, lastFrameT = 0, lightState = 'grey', lightP = 0;
 
       // Every gold blob inside a rectangle of the downscaled frame, in css coords.
       // The hand search does its own copy of this over the LEFT of the screen; this
@@ -4521,12 +4549,202 @@
         // The residual is eased in over the flight so the line still starts at the
         // dart rather than jumping away from it.
         const off = cfg.landN * H;
-        return t => {
+        const f = t => {
           const x = x0 + vx * t + 0.5 * ax * t * t;
           const frac = Math.min(1, Math.max(0, (x - x0) / Math.max(1, W * 0.55)));
           return { x, y: y0 + vy * t + 0.5 * (g + ay) * t * t + off * frac };
         };
+        // The horizontal coefficients, exposed so crossAt can solve for the board
+        // crossing exactly instead of stepping to it.
+        f.x0 = x0; f.vx = vx; f.ax = ax;
+        return f;
       }
+
+      // The y where the path reaches x = bx, solved rather than stepped. x(t) is
+      // monotonic -- the game's wind always pushes right (windX >= 0 for directions
+      // 300-450 deg) and vx is clamped >= 1 -- so there is exactly one crossing, and
+      // the stable root of 0.5*ax*t^2 + vx*t - dx = 0 is t = 2dx / (vx + sqrt(vx^2
+      // + 2 ax dx)), which does not cancel when ax is tiny. The drawn path used to
+      // take the first 12 ms step past the board: up to ~8 px of x overshoot, a few
+      // px of y. Both the path colour and the click light read this, so they cannot
+      // disagree about where a dart lands.
+      function crossAt(f, bx) {
+        const dx = bx - f.x0;
+        if (!(dx > 0)) return null;
+        const disc = f.vx * f.vx + 2 * f.ax * dx;
+        if (!(disc >= 0)) return null;
+        return f(2 * dx / (f.vx + Math.sqrt(disc))).y;
+      }
+
+      // ---------- the sweep ----------
+      // What the aim does between throws, so the light can say when it WILL be in
+      // the bullseye rather than only where it is now. From the game's own code
+      // (extracted source, ~/projects/minigames/src/darts.js and engine.js):
+      //     arm = -20 + (38 + 15n/(n+30)) * Trigg(sin, 0.71*score, e)
+      //     e   = 1.5 + (2.1 + max(0,(n-50)/75)) * n/(n+25)        n = scoring throws
+      // Trigg's clock advances 1.3 every 20 ms and its angle is (clock + b/e*360)*e
+      // degrees, so the phase runs at 65*e deg/s. The score term is only a phase
+      // jump at each landing, while the arm is hidden, so within one aiming spell
+      // it is a plain sinusoid. This file's angle is -arm plus AIM_BIAS, so the
+      // centre in aimDeg units is 20 + AIM_BIAS = 24.18.
+      //
+      // Checked by replaying three recordings (Screencast 2026-07-28 16-43-18,
+      // 17-14-58, 19-26-57; crop 1328x747+296+94, --fps 30) through the shipped
+      // helper and fitting every between-throw aim segment with a model held to
+      // that formula (centre fixed at 24.18, amplitude and speed both from one n):
+      // 150 segments, fit rms 0.3-2.7 deg, and the n recovered from each climbs
+      // steadily through each clip from 0 to ~35-40, i.e. it is counting the
+      // throws, as it should. On the two long segments (2.6 s, 72-76 samples) a
+      // FREE 4-parameter fit gave centre 24.9/23.8, amplitude 43.0/44.4 and speed
+      // 156.5/163.5 deg/s, which is the formula at n~19-24 on both counts.
+      //
+      // A free fit is NOT usable live: the player throws about 1 s after the arm
+      // reappears (typical segment 0.8 s, ~25 samples at 30fps), under half a
+      // sweep, and free fits there gave amplitudes of 93 and 130 deg. So the fit is
+      // constrained to one free number, n. Causal prediction error (fit on the
+      // samples so far, compare with the real reading later): 100 ms ahead median
+      // 0.9 deg / p90 2.8, 200 ms 1.0 / 3.4, 300 ms 1.1 / 3.7; already median 1.0 /
+      // p90 2.7 at 100 ms with only 5 samples. Against a bullseye ~4.3-4.9 deg wide
+      // that is good enough. No prior is carried between throws: measured
+      // unnecessary.
+      const SWEEP_C = 20 + AIM_BIAS;
+      const sweepE = n => 1.5 + (2.1 + Math.max(0, (n - 50) / 75)) * n / (n + 25);
+      const sweepW = n => 65 * sweepE(n) * Math.PI / 180;        // rad/s
+      const sweepA = n => 38 + 15 * n / (n + 30);                // deg
+
+      // Fit n (and the phase) to the fresh aims since the arm last reappeared.
+      // S = [{t (ms), d (deg)}]. For each candidate n the speed and amplitude are
+      // fixed by the formula, so what is left is linear: d - C = a sin(w tau) +
+      // b cos(w tau), two normal equations, then (a, b) rescaled to length A since
+      // a least-squares amplitude off under half a sweep is exactly the ill-
+      // conditioned number above. Coarse n = 0..250 at step 1, then +-1 around the
+      // best at step 0.1.
+      function fitSweep(S) {
+        const k = S.length;
+        if (k < 6 || S[k - 1].t - S[0].t < 150) return null;
+        const t0 = S[0].t;
+        const tau = S.map(s => (s.t - t0) / 1000), y = S.map(s => s.d - SWEEP_C);
+        const tryN = n => {
+          const w = sweepW(n), A = sweepA(n);
+          let ss = 0, cc = 0, sc = 0, sy = 0, cy = 0;
+          const sn = new Array(k), cs = new Array(k);
+          for (let i = 0; i < k; i++) {
+            const si = Math.sin(w * tau[i]), ci = Math.cos(w * tau[i]);
+            sn[i] = si; cs[i] = ci;
+            ss += si * si; cc += ci * ci; sc += si * ci; sy += si * y[i]; cy += ci * y[i];
+          }
+          const det = ss * cc - sc * sc;
+          if (!(Math.abs(det) > 1e-9)) return null;
+          let a = (sy * cc - cy * sc) / det, b = (cy * ss - sy * sc) / det;
+          const len = Math.hypot(a, b);
+          if (!(len > 1e-9)) return null;
+          a *= A / len; b *= A / len;
+          let r = 0;
+          for (let i = 0; i < k; i++) { const e = y[i] - a * sn[i] - b * cs[i]; r += e * e; }
+          return { n, w, a, b, rms: Math.sqrt(r / k) };
+        };
+        let best = null;
+        for (let n = 0; n <= 250; n++) { const r = tryN(n); if (r && (!best || r.rms < best.rms)) best = r; }
+        if (!best) return null;
+        const c = best.n;
+        for (let i = -10; i <= 10; i++) {
+          const n = c + i / 10; if (n < 0) continue;
+          const r = tryN(n); if (r && r.rms < best.rms) best = r;
+        }
+        const { n, w, a, b, rms } = best;
+        return { n, w, a, b, t0, rms, k,
+                 at: tms => { const q = (tms - t0) / 1000; return SWEEP_C + a * Math.sin(w * q) + b * Math.cos(w * q); } };
+      }
+
+      // A fit is only believed when it has enough to go on and still fits: six
+      // samples over 150 ms, rms under 3 deg (real segments measured 0.3-2.7), and
+      // the newest of them no older than 250 ms.
+      const FIT_RMS_MAX = 3, FIT_STALE_MS = 250, SWEEP_BUF = 120;
+
+      // The fletching point findAim returns barely moves as the arm turns.
+      // Regressed over 76 segments spanning >= 30 deg: x = a + b*cos(deg) with
+      // b = 0.0117 W (IQR 0.0104-0.0195 W, residual 0.9 px); y against sin(deg) has
+      // no consistent slope (IQR -0.040..+0.041 H, straddling zero; residual 2.4
+      // px), so y is treated as flat.
+      const LAUNCH_B = 0.0117;
+
+      // Bullseye geometry, from the game's source: ring edges at y 272 and 312 on
+      // the 960x540 design canvas, and the helper's canvas is that scaled (16:9).
+      // Verified on a real frame (17-14-58 at 30 s): the red band reads 276.1-310.8
+      // design px with the wires between bands centred ~273 and ~313. Landings
+      // within 5 px of a wire are pushed off it to the side they were on, and
+      // within 2 px there is a 10% chance of bouncing off (source landed()), which
+      // costs the streak. So the target is trimmed by BULL_MARGIN design px per
+      // side. 4 is a JUDGEMENT between two pulls, not a fit: it clears the 2 px
+      // bounce zone, and the landing prediction's own residual (sd 11.2 css px at
+      // H=747, ~8 design px, per the landN comment) argues for trimming the edges.
+      const BULL_MARGIN = 4;
+      const bullLo = H => (272 + BULL_MARGIN) / 540 * H;
+      const bullHi = H => (312 - BULL_MARGIN) / 540 * H;
+
+      // When, on the performance.now() clock, a release would land in the bullseye:
+      // step the fitted aim forward in 5 ms steps from 400 ms ago to one full
+      // period ahead (capped at 4 s), launch from the point the fletching would
+      // be at that angle, find the exact board crossing, and collect the runs that
+      // fall inside the band.
+      function findWindows(fit, now, launch, W, H, wnd, bx) {
+        const period = Math.min(4000, 2 * Math.PI / fit.w * 1000);
+        const lo = bullLo(H), hi = bullHi(H), c0 = Math.cos(launch.deg * Math.PI / 180);
+        const out = [];
+        let cur = null;
+        for (let tm = now - 400; tm <= now + period; tm += 5) {
+          const th = fit.at(tm), r = th * Math.PI / 180;
+          const f = predict(launch.x + LAUNCH_B * W * (Math.cos(r) - c0), launch.y, th, W, H, wnd);
+          const y = crossAt(f, bx);
+          if (y !== null && y >= lo && y <= hi) { if (cur) cur.t1 = tm; else out.push(cur = { t0: tm, t1: tm }); }
+          else cur = null;
+        }
+        return out;
+      }
+
+      // READY_MS: how far ahead the light goes yellow. Longer than a visual
+      // reaction (~200-250 ms) so the countdown can be anticipated rather than
+      // reacted to, short enough that yellow does not swallow the red gap between
+      // the two crossings per sweep (the period 2pi/w is 3.7 s at n=0, 2.2 s at
+      // n=25, 1.5 s at n=100). A UX choice, not a measurement.
+      const READY_MS = 400;
+
+      // ---------- release lead ----------
+      // Nobody can tell you your own reaction time, but your throws can. Every
+      // release locks an aim, and the helper knows when the bullseye windows were
+      // -- the gap between the two, in ms, is how late that release was.
+      //
+      // WHICH window you were aiming at is the only guess in it, so it is guarded
+      // twice: the runner-up has to be more than twice as far off as the winner or
+      // the throw is not attributable, and anything more than 300 ms from a window
+      // centre was not aimed at that window at all. Both guards fail towards having
+      // no reading rather than a wrong one, which is the right way round for a
+      // number whose whole job is to be believed.
+      //
+      // Read-only, deliberately. cfg.lead moves when you move it and not before: a
+      // light that silently chases your own misses is a light that shifts under you
+      // every time you start to learn the timing, and then neither of you is
+      // converging on anything.
+      function learnLead(wl, tr) {
+        if (!wl.length) return null;
+        const by = wl.map(w => ({ w, d: Math.abs(tr - (w.t0 + w.t1) / 2) })).sort((a, b) => a.d - b.d);
+        if (by[0].d > 300) return null;
+        if (by.length > 1 && by[1].d <= by[0].d * 2) return null;
+        const err = Math.round(tr - (by[0].w.t0 + by[0].w.t1) / 2);
+        cfg.leadObs.push(err);
+        if (cfg.leadObs.length > 12) cfg.leadObs.shift();
+        saveSoon();
+        return err;
+      }
+      // The middle one, not the mean: there are only ever twelve, and a single
+      // throw aimed somewhere else entirely would drag an average across the whole
+      // readout. Four before it says anything at all.
+      const leadSeen = () => {
+        const o = cfg.leadObs;
+        if (o.length < 4) return null;
+        const s = o.slice().sort((a, b) => a - b), h = s.length >> 1;
+        return s.length & 1 ? s[h] : (s[h - 1] + s[h]) / 2;
+      };
 
       function loop() {
         frame++;
@@ -4549,6 +4767,7 @@
 
         if (wallFrac(I) < 0.35) {
           board = null; dartPts = []; aimDeg = null; prevFly = [];
+          sweepS = []; fit = null; wins = []; launchPt = null;
           if (frame % 15 === 0) stEl.textContent = 'idle\nnot in Throwy Darts';
           probe({ frame, idle: 'gated out: wall < 35%' });
           return;
@@ -4562,6 +4781,10 @@
 
         const t = performance.now();
         const kx = W / I.w, ky = H / I.h;
+        // Frame interval, for the release-time estimate. Capped: a stall of a
+        // second is not a frame rate.
+        if (lastFrameT) frameEma += 0.1 * (Math.min(100, t - lastFrameT) - frameEma);
+        lastFrameT = t;
 
         // The dart's gold fletching — found as a BLOB, not as an average of every
         // gold pixel on screen. Averaging dragged the "hand" into the bottom-left
@@ -4640,19 +4863,46 @@
           // out 40 deg wrong and would have drawn a confident, wrong line.
           const df = frame - lastAimF;
           if (lastAim === null || df > 6 || Math.abs(aim.deg - lastAim) <= 12 * df) {
+            // The arm is hidden for ~1 s of flight, so a gap this long means a new
+            // aiming spell and a new phase.
+            if (t - aimT > 400) sweepS = [];
             aimDeg = aim.deg; aimT = t; lastAim = aim.deg; lastAimF = frame;
+            sweepS.push({ t, d: aimDeg });
+            if (sweepS.length > SWEEP_BUF) sweepS.shift();
+            launchPt = { x: aim.x, y: aim.y, deg: aimDeg };
           } else aim = null;
         }
+
+        // ---- sweep fit and bullseye windows ----
+        // Recomputed when a fresh aim arrives, not every frame: the fit only
+        // changes when the samples do, and windows are absolute times, so they stay
+        // true between samples. It also makes winsT the time of the last aim, which
+        // is what release attribution needs to know the windows were current.
+        if (cfg.light && aim && board && dartPts.length === 0) {
+          const f = fitSweep(sweepS);
+          fit = f && f.rms <= FIT_RMS_MAX ? f : null;
+          wins = fit ? findWindows(fit, t, launchPt, W, H, wind, board.x) : [];
+          winsT = t;
+        } else if (!cfg.light || !board) { fit = null; wins = []; }
 
         // ---- predicted path from the current aim ----
         let hitY = null, hitBand = null;
         if (cfg.path && aim && board && t - aimT < 400) {
           const f = predict(aim.x, aim.y, aimDeg, W, H, wind);
           const pts = [];
+          // The dots are stepped, but where the path ends is the exact crossing, so
+          // the ring, the band read and the click light all agree. It still only
+          // counts once the stepped path reaches the board: a path that drops off
+          // the bottom first has no hit, as before.
+          const cross = crossAt(f, board.x);
           for (let tt = 0; tt <= 3; tt += 0.012) {
             const p = f(tt);
+            if (p.x >= board.x) {
+              hitY = cross !== null ? cross : p.y;
+              pts.push({ x: board.x, y: hitY });
+              break;
+            }
             pts.push(p);
-            if (p.x >= board.x) { hitY = p.y; break; }
             if (p.y > H + 40 || p.x > W + 40) break;
           }
           if (pts.length > 1) {
@@ -4747,6 +4997,18 @@
             for (const f of fly) {
               const wasThere = prevFly.some(p => Math.hypot(p.x - f.x, p.y - f.y) <= STILL);
               if (wasThere) continue;
+              // Which window was this release aiming at? Only when the windows
+              // were computed within 100 ms of the last accepted aim and that aim
+              // is at most 600 ms back (the dart has to cross 0.30 W before the
+              // detector sees it, ~250 ms from a far-left platform). The arm
+              // vanished somewhere between the last frame that showed it and the
+              // next, so the release is taken half a frame after the last aim.
+              if (cfg.light && wins.length && Math.abs(winsT - aimT) <= 100 && t - aimT <= 600) {
+                const tr = aimT + frameEma / 2;
+                const err = learnLead(wins, tr);
+                if (err !== null) lastRel = { err, tr: Math.round(tr) };
+              }
+              sweepS = []; fit = null; wins = [];
               dartPts = [{ t, x: f.x, y: f.y }];
               flightT0 = t; lastDartT = t;
               flightAim = aimDeg !== null ? +aimDeg.toFixed(2) : null;
@@ -4770,13 +5032,65 @@
           }
         } else { prevFly = []; }
 
+        // ---- the click light ----
+        // s is the moment a click NOW would lock in: now plus your release lead.
+        lightState = 'grey'; lightP = 0;
+        const fitOk = !!(cfg.light && fit && board && dartPts.length === 0 && t - aimT <= FIT_STALE_MS);
+        if (fitOk) {
+          const s = t + (cfg.lead || 0);
+          if (wins.some(w => s >= w.t0 && s <= w.t1)) lightState = 'green';
+          else {
+            const nx = wins.find(w => w.t0 > s);
+            if (nx && nx.t0 - s <= READY_MS) { lightState = 'yellow'; lightP = 1 - (nx.t0 - s) / READY_MS; }
+            else lightState = 'red';
+          }
+        }
+        if (cfg.light && launchPt) {
+          // Drawn left of the thrower: the character sprite is 0.057 W wide and the
+          // fletching sits at its right edge, so 0.085 W clears the body, and the
+          // path always leaves to the right so the left never collides with it.
+          // Over the backdrop's alternating dark red-brown and light tan stripes a
+          // plain disc vanishes on one or the other, hence shadow, fill, white ring
+          // and a dark outer ring.
+          const R = Math.max(9, 0.012 * W), r = lightState === 'green' ? 1.15 * R : R;
+          const m = 1.15 * R + 9;
+          const cx = Math.max(m, Math.min(W - m, launchPt.x - 0.085 * W));
+          const cy = Math.max(m, Math.min(H - m, launchPt.y - 0.03 * H));
+          octx.save();
+          octx.fillStyle = { grey: '#6b7280', red: '#dc2626', yellow: '#ca8a04', green: '#16a34a' }[lightState];
+          octx.shadowColor = 'rgba(0,0,0,.6)'; octx.shadowBlur = 7;
+          octx.beginPath(); octx.arc(cx, cy, r, 0, Math.PI * 2); octx.fill();
+          octx.shadowBlur = 0;
+          octx.strokeStyle = '#fff'; octx.lineWidth = 2;
+          octx.beginPath(); octx.arc(cx, cy, r, 0, Math.PI * 2); octx.stroke();
+          octx.strokeStyle = 'rgba(0,0,0,.85)'; octx.lineWidth = 1.5;
+          octx.beginPath(); octx.arc(cx, cy, r + 1.75, 0, Math.PI * 2); octx.stroke();
+          if (lightState === 'yellow') {
+            // Closes exactly when green starts, so the click can be anticipated.
+            octx.strokeStyle = '#fff'; octx.lineWidth = 3;
+            octx.shadowColor = 'rgba(0,0,0,.8)'; octx.shadowBlur = 3;
+            octx.beginPath();
+            octx.arc(cx, cy, R + 5, -Math.PI / 2, -Math.PI / 2 + lightP * Math.PI * 2);
+            octx.stroke();
+          }
+          octx.restore();
+        }
+
         if (frame % 8 === 0) {
           const w = wind.key === 'none' ? 'no wind'
             : `wind ${wind.mph ? wind.mph + 'mph' : wind.key} ${wind.deg.toFixed(0)}°`;
           stEl.textContent = `${w} · ${board ? 'board ok' : 'NO BOARD'}\n` +
             (aimDeg !== null && t - aimT < 400
               ? `aim ${aimDeg.toFixed(0)}°${hitBand ? ` → ${hitBand.name}` : ''}`
-              : 'no dart in hand');
+              : 'no dart in hand') +
+            (fitOk && !wins.length ? ' · no bullseye this sweep' : '');
+          // The one thing watching cannot tell you: how late your own releases are
+          // landing against the windows. Set tuning > lead to what this says and it
+          // should read 0ms; it is the readout that proves the number, not the
+          // number itself.
+          const seen = leadSeen();
+          if (seen !== null)
+            stEl.textContent += `\nlead ${cfg.lead | 0}ms · throws ${Math.abs(seen) | 0}ms ${seen >= 0 ? 'late' : 'early'}`;
         }
 
         probe({
@@ -4795,7 +5109,13 @@
           // tell those two apart after the fact.
           aimReach: aim ? +aim.reach.toFixed(1) : null,
           aimR1: 100,
-          cal: { vN: cfg.vN, gN: cfg.gN, windK: cfg.windK, landN: cfg.landN }
+          cal: { vN: cfg.vN, gN: cfg.gN, windK: cfg.windK, landN: cfg.landN },
+          sweep: fit ? { n: +fit.n.toFixed(1), wDeg: Math.round(fit.w * 180 / Math.PI),
+                         rms: +fit.rms.toFixed(2), k: fit.k } : null,
+          light: lightState,
+          wins: wins.slice(0, 4).map(w => [Math.round(w.t0 - t), Math.round(w.t1 - t)]),
+          lead: cfg.lead, leadSeen: leadSeen(), leadObs: cfg.leadObs.length,
+          lastRel
         });
       }
       // ---------- wiring ----------
@@ -4804,7 +5124,28 @@
       $('#path').onchange  = e => { cfg.path = e.target.checked; save(); };
       $('#band').onchange  = e => { cfg.band = e.target.checked; save(); };
       $('#live').onchange  = e => { cfg.live = e.target.checked; save(); };
+      $('#light').onchange = e => { cfg.light = e.target.checked; save(); };
       $('#debug').onchange = e => { cfg.debug = e.target.checked; save(); };
+      // Unlike fishing, negative leads are allowed: the countdown invites
+      // anticipation, and a player who anticipates releases EARLY, so their
+      // measured error is negative and the lead that zeroes it is too.
+      $('#lead').onchange = e => {
+        cfg.lead = Math.max(-150, Math.min(400, +e.target.value || 0));
+        e.target.value = cfg.lead;
+        // The old readings were taken against windows drawn at the old lead, so
+        // they say nothing about this one. Keeping them would leave the status line
+        // reporting an error that has already been corrected for.
+        cfg.leadObs = []; save();
+      };
+      $('#takelead').onclick = () => {
+        // Adds to the lead rather than replacing it, because what the status line
+        // reports is the error REMAINING at the current setting. One press per few
+        // throws walks it in, and the readout going to 0ms is what says it is there.
+        const seen = leadSeen();
+        if (seen === null) return;
+        cfg.lead = Math.max(-150, Math.min(400, Math.round((cfg.lead + seen) / 5) * 5));
+        cfg.leadObs = []; save(); sync();
+      };
       $('#cal').onclick = () => {
         cfg.vN = 0.548; cfg.gN = 0.612; cfg.landN = 0;
         cfg.windK = 0.01389;
